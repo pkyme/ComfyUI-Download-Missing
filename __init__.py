@@ -1,690 +1,402 @@
 """
-ComfyUI Download Missing Models Extension
+ComfyUI Extension: Download Missing Models
 
-This extension adds functionality to find and download missing models from template workflows
-that include download URLs in their node properties.
+This extension scans workflows for missing models and provides a UI to download them.
 """
 
 import os
-import json
+import asyncio
+import aiohttp
+import logging
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+from aiohttp import web
 import folder_paths
 from server import PromptServer
-from aiohttp import web
-import logging
-from datetime import datetime
-import sys
-import asyncio
 
-# Add ComfyUI Manager to path to use its download functionality
-manager_path = os.path.join(os.path.dirname(__file__), '..', 'ComfyUI-Manager')
-if os.path.exists(manager_path):
-    # Add the glob subdirectory to sys.path
-    manager_glob_path = os.path.join(manager_path, 'glob')
-    if os.path.exists(manager_glob_path):
-        sys.path.append(manager_glob_path)
-        try:
-            import manager_downloader
-            import manager_core
-            MANAGER_AVAILABLE = True
-            print("[MissingModelsFinder] ComfyUI Manager modules imported successfully")
-        except ImportError as e:
-            print(f"[MissingModelsFinder] Failed to import ComfyUI Manager modules: {e}")
-            MANAGER_AVAILABLE = False
-        except Exception as e:
-            print(f"[MissingModelsFinder] Error importing ComfyUI Manager modules: {e}")
-            MANAGER_AVAILABLE = False
-    else:
-        print(f"[MissingModelsFinder] ComfyUI Manager glob path not found: {manager_glob_path}")
-        MANAGER_AVAILABLE = False
-else:
-    print(f"[MissingModelsFinder] ComfyUI Manager path not found: {manager_path}")
-    MANAGER_AVAILABLE = False
+# Global state for download progress
+download_progress = {}
+download_tasks = {}
 
-# Set up logging
-logger = logging.getLogger(__name__)
+class MissingModelsExtension:
+    """Extension to find and download missing models from workflows"""
 
-# Enable detailed logging for debugging (can be disabled later)
-DEBUG_LOGGING = False
-
-def debug_log(message):
-    """Helper function for debug logging that can be easily disabled"""
-    if DEBUG_LOGGING:
-        logger.info(f"[MissingModelsFinder] {message}")
-
-# Log extension loading
-print("[MissingModelsFinder] Extension loading...")
-
-class MissingModelsFinder:
-    """
-    Handles finding missing models in workflows and managing downloads
-    """
-    
     def __init__(self):
         self.routes = PromptServer.instance.routes
-        self.websocket_connections = set()
-        self.active_downloads = {}  # Track active downloads by model name
-        self.download_queue = []  # Track queued downloads
-        self.max_concurrent_downloads = 3  # Maximum concurrent downloads
         self.setup_routes()
-        self.setup_websockets()
-    
-    def setup_websockets(self):
-        """Set up WebSocket routes for real-time progress updates"""
-        
-        @self.routes.get('/missing-models/ws')
-        async def websocket_handler(request):
-            """Handle WebSocket connections for progress updates"""
-            
-            ws = web.WebSocketResponse()
-            await ws.prepare(request)
-            
-            # Add to active connections
-            self.websocket_connections.add(ws)
-            
-            try:
-                async for msg in ws:
-                    if msg.type == web.WSMsgType.TEXT:
-                        data = json.loads(msg.data)
-                        
-                        # Handle different message types
-                        if data.get('type') == 'ping':
-                            await ws.send_json({'type': 'pong'})
-                            
-            except Exception as e:
-                debug_log(f"WebSocket error: {e}")
-            finally:
-                # Remove from active connections
-                self.websocket_connections.discard(ws)
-            
-            return ws
-    
+        logging.info("[Download Missing Models] Extension initialized")
+
     def setup_routes(self):
-        """Set up API routes for the extension"""
-        
-        @self.routes.get("/missing-models/test")
-        async def test_endpoint(request):
-            """
-            Test endpoint to verify the extension is working
-            """
-            return web.json_response({
-                "status": "working",
-                "message": "Missing Models Finder extension is running",
-                "timestamp": str(datetime.now())
-            })
-        
-        @self.routes.post("/missing-models/analyze")
-        async def analyze_missing_models(request):
-            """
-            Analyze the current workflow for missing models with download URLs
-            """
+        """Register API routes"""
+
+        @self.routes.post("/download-missing/scan")
+        async def scan_workflow(request):
+            """Scan workflow for missing models"""
             try:
                 data = await request.json()
                 workflow = data.get('workflow', {})
-                nodes = workflow.get('nodes', [])
-                
-                if not workflow or not nodes:
-                    return web.json_response({
-                        "error": "No workflow data provided in request",
-                        "missing_models": [],
-                        "total_missing": 0
-                    }, status=400)
-                
+
                 missing_models = self.find_missing_models(workflow)
-                
+
                 return web.json_response({
-                    "missing_models": missing_models,
-                    "total_missing": len(missing_models)
+                    'status': 'success',
+                    'missing_models': missing_models,
+                    'count': len(missing_models)
                 })
-                
             except Exception as e:
-                logger.error(f"Error analyzing missing models: {e}")
+                logging.error(f"[Download Missing Models] Error scanning workflow: {e}")
                 return web.json_response({
-                    "error": f"Failed to analyze workflow: {str(e)}"
+                    'status': 'error',
+                    'message': str(e)
                 }, status=500)
-        
-        @self.routes.post("/missing-models/download")
-        async def download_missing_model(request):
-            """
-            Download a specific missing model
-            """
+
+        @self.routes.post("/download-missing/download")
+        async def download_model(request):
+            """Start downloading a model"""
             try:
                 data = await request.json()
-                model_name = data.get('name')
-                model_url = data.get('url')
-                target_directory = data.get('directory', 'checkpoints')
-                
+                model_name = data.get('model_name')
+                model_url = data.get('model_url')
+                model_folder = data.get('model_folder', 'checkpoints')
+
                 if not model_name or not model_url:
                     return web.json_response({
-                        "error": "Missing required parameters: name and url"
+                        'status': 'error',
+                        'message': 'Missing model_name or model_url'
                     }, status=400)
-                
-                # Get the actual model directory path
-                model_dir = self.get_model_directory_path(target_directory)
-                
-                if MANAGER_AVAILABLE:
-                    # Use ComfyUI Manager's download functionality
-                    try:
-                        # Check if we can start this download immediately
-                        if len(self.active_downloads) >= self.max_concurrent_downloads:
-                            # Send queued status
-                            progress_data = {
-                                'model_name': model_name,
-                                'progress': 0,
-                                'downloaded': 0,
-                                'total': 0,
-                                'status': 'queued'
-                            }
-                            await self.broadcast_progress(progress_data)
-                            
-                            # Add to queue
-                            self.download_queue.append({
-                                'name': model_name,
-                                'url': model_url,
-                                'directory': target_directory
-                            })
-                            
-                            # Return queued response
-                            return web.json_response({
-                                "status": "queued",
-                                "message": f"Download queued for {model_name}"
-                            })
-                        
-                        # Start the download immediately
-                        return await self.start_download(model_name, model_url, model_dir)
-                        
-                    except Exception as e:
-                        # Remove from active downloads on error
-                        if model_name in self.active_downloads:
-                            del self.active_downloads[model_name]
-                        
-                        # Send error message
-                        progress_data = {
-                            'model_name': model_name,
-                            'progress': 0,
-                            'downloaded': 0,
-                            'total': 0,
-                            'status': 'error',
-                            'error': str(e)
-                        }
-                        await self.broadcast_progress(progress_data)
-                        
-                        return web.json_response({
-                            "error": f"Failed to download model: {str(e)}"
-                        }, status=500)
-                else:
-                    # ComfyUI Manager not available
-                    return web.json_response({
-                        "error": "ComfyUI Manager not available for downloads"
-                    }, status=500)
-                
-            except Exception as e:
-                logger.error(f"Error downloading model: {e}")
+
+                # Cancel existing download if running
+                if model_name in download_tasks:
+                    download_tasks[model_name].cancel()
+
+                # Start download task
+                task = asyncio.create_task(
+                    self.download_model_async(model_name, model_url, model_folder)
+                )
+                download_tasks[model_name] = task
+
                 return web.json_response({
-                    "error": f"Failed to download model: {str(e)}"
-                }, status=500)
-        
-        @self.routes.get("/missing-models/check-installed")
-        async def check_installed_models(request):
-            """
-            Check which models from a list are already installed
-            """
-            try:
-                # Get list of models to check from query parameters
-                models_to_check = request.rel_url.query.get('models', '').split(',')
-                
-                installed_models = {}
-                for model_name in models_to_check:
-                    if model_name:
-                        is_installed = self.is_model_installed(model_name)
-                        installed_models[model_name] = is_installed
-                
-                return web.json_response({
-                    "installed_models": installed_models
+                    'status': 'success',
+                    'message': f'Download started for {model_name}'
                 })
-                
             except Exception as e:
-                logger.error(f"Error checking installed models: {e}")
+                logging.error(f"[Download Missing Models] Error starting download: {e}")
                 return web.json_response({
-                    "error": f"Failed to check installed models: {str(e)}"
+                    'status': 'error',
+                    'message': str(e)
                 }, status=500)
-    
-    def find_missing_models(self, workflow):
+
+        @self.routes.get("/download-missing/status")
+        async def get_status(request):
+            """Get download progress for all models"""
+            return web.json_response({
+                'status': 'success',
+                'downloads': download_progress
+            })
+
+        @self.routes.get("/download-missing/status/{model_name}")
+        async def get_model_status(request):
+            """Get download progress for a specific model"""
+            model_name = request.match_info.get("model_name")
+
+            if model_name in download_progress:
+                return web.json_response({
+                    'status': 'success',
+                    'progress': download_progress[model_name]
+                })
+            else:
+                return web.json_response({
+                    'status': 'error',
+                    'message': 'Model not found in download queue'
+                }, status=404)
+
+        @self.routes.post("/download-missing/cancel")
+        async def cancel_download(request):
+            """Cancel a running download"""
+            try:
+                data = await request.json()
+                model_name = data.get('model_name')
+
+                if model_name in download_tasks:
+                    download_tasks[model_name].cancel()
+                    if model_name in download_progress:
+                        download_progress[model_name]['status'] = 'cancelled'
+
+                    return web.json_response({
+                        'status': 'success',
+                        'message': f'Download cancelled for {model_name}'
+                    })
+                else:
+                    return web.json_response({
+                        'status': 'error',
+                        'message': 'No active download found'
+                    }, status=404)
+            except Exception as e:
+                logging.error(f"[Download Missing Models] Error cancelling download: {e}")
+                return web.json_response({
+                    'status': 'error',
+                    'message': str(e)
+                }, status=500)
+
+    def find_missing_models(self, workflow: dict) -> List[dict]:
         """
-        Find missing models in the workflow that have download URLs
-        
-        Args:
-            workflow: The workflow JSON object
-            
-        Returns:
-            List of missing model objects with name, url, and directory
+        Scan workflow and find missing models
+
+        Returns list of dicts with: name, url, folder, size, type
         """
         missing_models = []
-        
-        # Get nodes from workflow - it can be a list or dict
         nodes = workflow.get('nodes', [])
-        
-        # Iterate through all nodes in the workflow
-        for i, node_data in enumerate(nodes):
-            # Handle both list and dict formats
-            if isinstance(node_data, dict):
-                node_id = node_data.get('id', str(i))
-                node_type = node_data.get('type', 'Unknown')
-                
-                # Check if node has properties with models array
-                properties = node_data.get('properties', {})
-                
-                if 'models' in properties and isinstance(properties['models'], list):
-                    for model_info in properties['models']:
-                        if isinstance(model_info, dict):
-                            model_name = model_info.get('name')
-                            model_url = model_info.get('url')
-                            model_directory = model_info.get('directory', 'checkpoints')
-                            
-                            # Only process models that have both name and URL
-                            if model_name and model_url:
-                                # Check if model is already installed
-                                is_installed = self.is_model_installed_in_directory(model_name, model_directory)
-                                
-                                if not is_installed:
-                                    missing_models.append({
-                                        'name': model_name,
-                                        'url': model_url,
-                                        'directory': model_directory,
-                                        'source_node': node_id,
-                                        'node_type': node_type
-                                    })
-        
-        return missing_models
-    
-    def is_model_installed_in_directory(self, model_name, directory):
-        """
-        Check if a model is already installed in the specified directory
-        
-        Args:
-            model_name: Name of the model file
-            directory: Target directory (e.g., 'checkpoints', 'loras', 'vae')
-            
-        Returns:
-            bool: True if model is installed, False otherwise
-        """
+
+        for node in nodes:
+            # Check node properties for embedded model info
+            properties = node.get('properties', {})
+
+            if 'models' in properties and isinstance(properties['models'], list):
+                for model_info in properties['models']:
+                    model_name = model_info.get('name')
+                    model_url = model_info.get('url')
+                    # Try 'directory' first, then 'folder' as fallback
+                    model_folder = model_info.get('directory') or model_info.get('folder', 'checkpoints')
+
+                    # Only add if model has a URL and is not installed
+                    if model_name and model_url and not self.is_model_installed(model_name, model_folder):
+                        missing_models.append({
+                            'name': model_name,
+                            'url': model_url,
+                            'folder': model_folder,
+                            'directory': model_folder,  # Add directory field for UI
+                            'node_id': node.get('id'),
+                            'node_type': node.get('type')
+                        })
+
+            # Only check widgets_values if no models were found in properties
+            # This prevents duplicates when a node has both properties.models and widgets_values
+            if 'models' not in properties or not isinstance(properties.get('models'), list):
+                widgets_values = node.get('widgets_values', [])
+                node_type = node.get('type', '')
+
+                # Map node types to model folders
+                node_to_folder = {
+                    'CheckpointLoaderSimple': 'checkpoints',
+                    'CheckpointLoader': 'checkpoints',
+                    'UNETLoader': 'unet',
+                    'LoraLoader': 'loras',
+                    'VAELoader': 'vae',
+                    'ControlNetLoader': 'controlnet',
+                    'CLIPLoader': 'clip',
+                }
+
+                if node_type in node_to_folder and widgets_values:
+                    model_name = widgets_values[0] if isinstance(widgets_values[0], str) else None
+                    if model_name and not self.is_model_installed(model_name, node_to_folder[node_type]):
+                        # Try to find URL in node properties or workflow metadata
+                        model_url = self.find_model_url(workflow, model_name, node)
+
+                        # Only add if URL is available
+                        if model_url:
+                            model_folder = node_to_folder[node_type]
+                            missing_models.append({
+                                'name': model_name,
+                                'url': model_url,
+                                'folder': model_folder,
+                                'directory': model_folder,  # Add directory field for UI
+                                'node_id': node.get('id'),
+                                'node_type': node_type
+                            })
+
+        # Check workflow-level metadata
+        extra = workflow.get('extra', {})
+        if 'model_urls' in extra:
+            for model_name, model_data in extra['model_urls'].items():
+                # Try 'directory' first, then 'folder' as fallback
+                model_folder = model_data.get('directory') or model_data.get('folder', 'checkpoints')
+                if not self.is_model_installed(model_name, model_folder):
+                    missing_models.append({
+                        'name': model_name,
+                        'url': model_data.get('url'),
+                        'folder': model_folder,
+                        'directory': model_folder,  # Add directory field for UI
+                        'node_id': None,
+                        'node_type': 'metadata'
+                    })
+
+        # Remove duplicates
+        seen = set()
+        unique_models = []
+        for model in missing_models:
+            key = (model['name'], model['folder'])
+            if key not in seen:
+                seen.add(key)
+                unique_models.append(model)
+
+        return unique_models
+
+    def find_model_url(self, workflow: dict, model_name: str, node: dict) -> Optional[str]:
+        """Try to find model URL from workflow metadata or node properties"""
+        # Check node properties first
+        properties = node.get('properties', {})
+        if 'model_url' in properties:
+            return properties['model_url']
+
+        # Check workflow extra data
+        extra = workflow.get('extra', {})
+        if 'model_urls' in extra:
+            model_urls = extra['model_urls']
+            if model_name in model_urls:
+                return model_urls[model_name].get('url')
+
+        return None
+
+    def is_model_installed(self, model_name: str, folder_type: str) -> bool:
+        """Check if model exists in the specified folder"""
         try:
-            # Map directory names to folder_paths folder names
-            directory_map = {
+            # Map folder types to folder_paths keys
+            folder_map = {
                 'checkpoints': 'checkpoints',
-                'checkpoint': 'checkpoints',
                 'loras': 'loras',
                 'lora': 'loras',
                 'vae': 'vae',
                 'controlnet': 'controlnet',
+                'clip': 'text_encoders',
                 'clip_vision': 'clip_vision',
+                'unet': 'diffusion_models',
+                'diffusion_models': 'diffusion_models',
                 'embeddings': 'embeddings',
+                'hypernetworks': 'hypernetworks',
                 'upscale_models': 'upscale_models',
-                'diffusion_models': 'diffusion_models'
             }
-            
-            folder_name = directory_map.get(directory.lower(), directory)
-            
-            # Get list of files in the target directory
-            if folder_name in folder_paths.folder_names_and_paths:
-                folder_paths_list = folder_paths.get_filename_list(folder_name)
-                return model_name in folder_paths_list
-            
+
+            folder_key = folder_map.get(folder_type.lower(), folder_type)
+
+            if folder_key in folder_paths.folder_names_and_paths:
+                file_list = folder_paths.get_filename_list(folder_key)
+
+                # Check exact match and with path
+                for filename in file_list:
+                    if filename == model_name or filename.endswith('/' + model_name) or filename.endswith('\\' + model_name):
+                        return True
+
             return False
-            
         except Exception as e:
-            logger.error(f"Error checking if model {model_name} is installed in {directory}: {e}")
+            logging.error(f"[Download Missing Models] Error checking model installation: {e}")
             return False
-    
-    def is_model_installed(self, model_name):
-        """
-        Check if a model is installed in any directory
-        
-        Args:
-            model_name: Name of the model file
-            
-        Returns:
-            bool: True if model is installed anywhere, False otherwise
-        """
-        try:
-            # Check all model directories
-            for folder_name in folder_paths.folder_names_and_paths:
-                folder_paths_list = folder_paths.get_filename_list(folder_name)
-                if model_name in folder_paths_list:
-                    return True
-            return False
-            
-        except Exception as e:
-            logger.error(f"Error checking if model {model_name} is installed: {e}")
-            return False
-    
-    def get_model_directory_path(self, directory_name):
-        """
-        Get the actual filesystem path for a model directory
-        
-        Args:
-            directory_name: Directory name (e.g., 'checkpoints', 'loras', 'vae')
-            
-        Returns:
-            str: Full filesystem path to the directory
-        """
-        # Map directory names to folder_paths folder names
-        directory_map = {
+
+    def get_model_destination(self, folder_type: str) -> str:
+        """Get the full path to the model folder"""
+        folder_map = {
             'checkpoints': 'checkpoints',
-            'checkpoint': 'checkpoints',
             'loras': 'loras',
             'lora': 'loras',
             'vae': 'vae',
             'controlnet': 'controlnet',
+            'clip': 'text_encoders',
             'clip_vision': 'clip_vision',
-            'embeddings': 'embeddings',
-            'upscale_models': 'upscale_models',
+            'unet': 'diffusion_models',
             'diffusion_models': 'diffusion_models',
-            'text_encoders': 'text_encoders'
+            'embeddings': 'embeddings',
+            'hypernetworks': 'hypernetworks',
+            'upscale_models': 'upscale_models',
         }
-        
-        folder_name = directory_map.get(directory_name.lower(), directory_name)
-        
-        if folder_name in folder_paths.folder_names_and_paths:
-            # Get the first path from the folder_paths (it returns a tuple of (paths, extensions))
-            folder_paths_data = folder_paths.folder_names_and_paths[folder_name]
-            if folder_paths_data and len(folder_paths_data) > 0:
-                # The first element is the list of paths
-                paths_list = folder_paths_data[0]
-                if paths_list and len(paths_list) > 0:
-                    return paths_list[0]
-        
-        # Fallback: create a directory in the ComfyUI models folder
-        comfyui_path = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-        fallback_path = os.path.join(comfyui_path, 'models', folder_name)
-        return fallback_path
-    
-    async def start_download(self, model_name, model_url, model_dir):
-        """
-        Start a download and track it in active_downloads
-        
-        Args:
-            model_name: Name of the model
-            model_url: URL to download from
-            model_dir: Directory to save to
-            
-        Returns:
-            web.Response: JSON response with download status
-        """
-        # Add to active downloads
-        self.active_downloads[model_name] = {
+
+        folder_key = folder_map.get(folder_type.lower(), folder_type)
+
+        if folder_key in folder_paths.folder_names_and_paths:
+            folders = folder_paths.get_folder_paths(folder_key)
+            if folders:
+                return folders[0]  # Use first folder path
+
+        # Fallback
+        models_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', '..', 'models')
+        return os.path.join(models_dir, folder_type)
+
+    async def download_model_async(self, model_name: str, model_url: str, model_folder: str):
+        """Download model with progress tracking"""
+        global download_progress
+
+        # Initialize progress
+        download_progress[model_name] = {
             'status': 'downloading',
-            'start_time': datetime.now()
-        }
-        
-        # Send downloading message
-        progress_data = {
-            'model_name': model_name,
             'progress': 0,
             'downloaded': 0,
             'total': 0,
-            'status': 'downloading'
+            'error': None
         }
-        await self.broadcast_progress(progress_data)
-        
-        try:
-            # Start the download
-            manager_downloader.download_url(model_url, model_dir, model_name)
-            
-            # Remove from active downloads
-            if model_name in self.active_downloads:
-                del self.active_downloads[model_name]
-            
-            # Send completion message
-            progress_data = {
-                'model_name': model_name,
-                'progress': 100,
-                'downloaded': 0,
-                'total': 0,
-                'status': 'completed'
-            }
-            await self.broadcast_progress(progress_data)
-            
-            # Process next download in queue if any
-            await self.process_next_download()
-            
-            return web.json_response({
-                "status": "download_completed",
-                "message": f"Download completed for {model_name}"
-            })
-            
-        except Exception as e:
-            # Remove from active downloads on error
-            if model_name in self.active_downloads:
-                del self.active_downloads[model_name]
-            
-            # Send error message
-            progress_data = {
-                'model_name': model_name,
-                'progress': 0,
-                'downloaded': 0,
-                'total': 0,
-                'status': 'error',
-                'error': str(e)
-            }
-            await self.broadcast_progress(progress_data)
-            
-            # Process next download in queue if any
-            await self.process_next_download()
-            
-            return web.json_response({
-                "error": f"Failed to download model: {str(e)}"
-            }, status=500)
-    
-    async def process_next_download(self):
-        """
-        Process the next download in the queue if there are available slots
-        """
-        if self.download_queue and len(self.active_downloads) < self.max_concurrent_downloads:
-            next_download = self.download_queue.pop(0)
-            
-            # Get the model directory path
-            model_dir = self.get_model_directory_path(next_download['directory'])
-            
-            # Start the download using the appropriate method
-            if MANAGER_AVAILABLE:
-                await self.start_download(next_download['name'], next_download['url'], model_dir)
-            else:
-                await self.start_basic_download(next_download['name'], next_download['url'], model_dir)
-    
-    async def basic_download_model(self, model_url, model_dir, model_name):
-        """
-        Basic download functionality using requests (fallback)
-        
-        Args:
-            model_url: URL to download from
-            model_dir: Directory to save to
-            model_name: Name of the model file
-            
-        Returns:
-            web.Response: JSON response with download status
-        """
-        # Check if we can start this download immediately
-        if len(self.active_downloads) >= self.max_concurrent_downloads:
-            # Send queued status
-            progress_data = {
-                'model_name': model_name,
-                'progress': 0,
-                'downloaded': 0,
-                'total': 0,
-                'status': 'queued'
-            }
-            await self.broadcast_progress(progress_data)
-            
-            # Add to queue
-            self.download_queue.append({
-                'name': model_name,
-                'url': model_url,
-                'directory': os.path.basename(model_dir)  # Extract directory name from path
-            })
-            
-            # Return queued response
-            return web.json_response({
-                "status": "queued",
-                "message": f"Download queued for {model_name}"
-            })
-        
-        # Start the download immediately
-        return await self.start_basic_download(model_name, model_url, model_dir)
-    
-    async def start_basic_download(self, model_name, model_url, model_dir):
-        """
-        Start a basic download using requests
-        
-        Args:
-            model_name: Name of the model
-            model_url: URL to download from
-            model_dir: Directory to save to
-            
-        Returns:
-            web.Response: JSON response with download status
-        """
-        try:
-            import requests
-            
-            # Add to active downloads
-            self.active_downloads[model_name] = {
-                'status': 'downloading',
-                'start_time': datetime.now()
-            }
-            
-            # Ensure the directory exists
-            if not os.path.exists(model_dir):
-                os.makedirs(model_dir)
-            
-            # Full path to save the file
-            dest_path = os.path.join(model_dir, model_name)
-            
-            # Send downloading message
-            progress_data = {
-                'model_name': model_name,
-                'progress': 0,
-                'downloaded': 0,
-                'total': 0,
-                'status': 'downloading'
-            }
-            await self.broadcast_progress(progress_data)
-            
-            # Download the file
-            response = requests.get(model_url, stream=True)
-            
-            if response.status_code == 200:
-                with open(dest_path, 'wb') as file:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            file.write(chunk)
-                
-                # Remove from active downloads
-                if model_name in self.active_downloads:
-                    del self.active_downloads[model_name]
-                
-                # Send completion message
-                progress_data = {
-                    'model_name': model_name,
-                    'progress': 100,
-                    'downloaded': 0,
-                    'total': 0,
-                    'status': 'completed'
-                }
-                await self.broadcast_progress(progress_data)
-                
-                # Process next download in queue if any
-                await self.process_next_download()
-                
-                return web.json_response({
-                    "status": "download_completed",
-                    "message": f"Download completed for {model_name}",
-                    "path": dest_path
-                })
-            else:
-                error_msg = f"Failed to download file from {model_url}: HTTP {response.status_code}"
-                
-                # Remove from active downloads on error
-                if model_name in self.active_downloads:
-                    del self.active_downloads[model_name]
-                
-                # Send error message
-                progress_data = {
-                    'model_name': model_name,
-                    'progress': 0,
-                    'downloaded': 0,
-                    'total': 0,
-                    'status': 'error',
-                    'error': error_msg
-                }
-                await self.broadcast_progress(progress_data)
-                
-                # Process next download in queue if any
-                await self.process_next_download()
-                
-                return web.json_response({
-                    "error": error_msg
-                }, status=500)
-                
-        except Exception as e:
-            error_msg = f"Download failed: {str(e)}"
-            
-            # Remove from active downloads on error
-            if model_name in self.active_downloads:
-                del self.active_downloads[model_name]
-            
-            # Send error message
-            progress_data = {
-                'model_name': model_name,
-                'progress': 0,
-                'downloaded': 0,
-                'total': 0,
-                'status': 'error',
-                'error': error_msg
-            }
-            await self.broadcast_progress(progress_data)
-            
-            # Process next download in queue if any
-            await self.process_next_download()
-            
-            return web.json_response({
-                "error": error_msg
-            }, status=500)
 
-# Web directory for frontend files
-WEB_DIRECTORY = "./js"
+        try:
+            # Get destination folder
+            dest_folder = self.get_model_destination(model_folder)
+            os.makedirs(dest_folder, exist_ok=True)
+
+            dest_path = os.path.join(dest_folder, model_name)
+            temp_path = dest_path + '.tmp'
+
+            # Download with progress
+            timeout = aiohttp.ClientTimeout(total=None, connect=60, sock_read=60)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(model_url) as response:
+                    if response.status != 200:
+                        raise Exception(f"HTTP {response.status}: {response.reason}")
+
+                    total_size = int(response.headers.get('content-length', 0))
+                    download_progress[model_name]['total'] = total_size
+
+                    downloaded = 0
+                    chunk_size = 1048576  # 1MB chunks (optimized for large files)
+                    progress_update_threshold = 10  # Update progress every 10 chunks (every 10MB)
+                    chunk_counter = 0
+
+                    with open(temp_path, 'wb') as f:
+                        async for chunk in response.content.iter_chunked(chunk_size):
+                            if chunk:
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                                chunk_counter += 1
+
+                                # Throttled progress updates (every 10MB or on last chunk)
+                                if chunk_counter % progress_update_threshold == 0 or downloaded >= total_size:
+                                    download_progress[model_name]['downloaded'] = downloaded
+                                    if total_size > 0:
+                                        progress = (downloaded / total_size) * 100
+                                        download_progress[model_name]['progress'] = round(progress, 2)
+
+                    # Move temp file to final location
+                    if os.path.exists(dest_path):
+                        os.remove(dest_path)
+                    os.rename(temp_path, dest_path)
+
+                    # Mark as complete
+                    download_progress[model_name]['status'] = 'completed'
+                    download_progress[model_name]['progress'] = 100
+
+                    logging.info(f"[Download Missing Models] Successfully downloaded {model_name}")
+
+        except asyncio.CancelledError:
+            # Clean up temp file
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            download_progress[model_name]['status'] = 'cancelled'
+            logging.info(f"[Download Missing Models] Download cancelled for {model_name}")
+
+        except Exception as e:
+            # Clean up temp file
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+
+            error_msg = str(e)
+            download_progress[model_name]['status'] = 'error'
+            download_progress[model_name]['error'] = error_msg
+            logging.error(f"[Download Missing Models] Error downloading {model_name}: {error_msg}")
+
+        finally:
+            # Clean up task reference
+            if model_name in download_tasks:
+                del download_tasks[model_name]
 
 # Initialize the extension
-missing_models_finder = MissingModelsFinder()
-
-# Add WebSocket broadcast method to the instance
-async def broadcast_progress(progress_data):
-    """Broadcast progress updates to all connected WebSocket clients"""
-    if not missing_models_finder.websocket_connections:
-        return
-        
-    message = json.dumps({
-        'type': 'download_progress',
-        'data': progress_data
-    })
-    
-    disconnected = set()
-    for ws in missing_models_finder.websocket_connections:
-        try:
-            await ws.send_str(message)
-        except Exception:
-            disconnected.add(ws)
-    
-    # Remove disconnected clients
-    for ws in disconnected:
-        missing_models_finder.websocket_connections.discard(ws)
-
-# Make broadcast function available to the instance
-missing_models_finder.broadcast_progress = broadcast_progress
+extension = MissingModelsExtension()
 
 # Export for ComfyUI
+WEB_DIRECTORY = "./web"
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
-
-__all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']
-
-print("[MissingModelsFinder] Extension loaded successfully")
+__all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS', 'WEB_DIRECTORY']
