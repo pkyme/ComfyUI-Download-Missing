@@ -7,6 +7,7 @@ This extension scans workflows for missing models and provides a UI to download 
 import os
 import asyncio
 import aiohttp
+import aiofiles
 import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -23,8 +24,25 @@ class MissingModelsExtension:
 
     def __init__(self):
         self.routes = PromptServer.instance.routes
+        # Create shared ClientSession for connection pooling
+        connector = aiohttp.TCPConnector(
+            limit=10,  # Maximum number of connections
+            limit_per_host=5,  # Maximum connections per host
+            ttl_dns_cache=300,  # DNS cache TTL in seconds
+            enable_cleanup_closed=True
+        )
+        timeout = aiohttp.ClientTimeout(
+            total=None,  # No total timeout (handled per-download)
+            connect=60,  # Connection timeout
+            sock_read=120  # Socket read timeout (increased for large files)
+        )
+        self.session = aiohttp.ClientSession(
+            connector=connector,
+            timeout=timeout,
+            raise_for_status=False
+        )
         self.setup_routes()
-        logging.info("[Download Missing Models] Extension initialized")
+        logging.info("[Download Missing Models] Extension initialized with connection pooling")
 
     def setup_routes(self):
         """Register API routes"""
@@ -330,34 +348,33 @@ class MissingModelsExtension:
             dest_path = os.path.join(dest_folder, model_name)
             temp_path = dest_path + '.tmp'
 
-            # Download with progress
-            timeout = aiohttp.ClientTimeout(total=None, connect=60, sock_read=60)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(model_url) as response:
-                    if response.status != 200:
-                        raise Exception(f"HTTP {response.status}: {response.reason}")
+            # Download with progress using shared session
+            async with self.session.get(model_url) as response:
+                if response.status != 200:
+                    raise Exception(f"HTTP {response.status}: {response.reason}")
 
-                    total_size = int(response.headers.get('content-length', 0))
-                    download_progress[model_name]['total'] = total_size
+                total_size = int(response.headers.get('content-length', 0))
+                download_progress[model_name]['total'] = total_size
 
-                    downloaded = 0
-                    chunk_size = 1048576  # 1MB chunks (optimized for large files)
-                    progress_update_threshold = 10  # Update progress every 10 chunks (every 10MB)
-                    chunk_counter = 0
+                downloaded = 0
+                chunk_size = 4194304  # 4MB chunks (optimized for large files)
+                progress_update_threshold = 5  # Update progress every 5 chunks (every 20MB)
+                chunk_counter = 0
 
-                    with open(temp_path, 'wb') as f:
-                        async for chunk in response.content.iter_chunked(chunk_size):
-                            if chunk:
-                                f.write(chunk)
-                                downloaded += len(chunk)
-                                chunk_counter += 1
+                # Use async file I/O to avoid blocking the event loop
+                async with aiofiles.open(temp_path, 'wb') as f:
+                    async for chunk in response.content.iter_chunked(chunk_size):
+                        if chunk:
+                            await f.write(chunk)
+                            downloaded += len(chunk)
+                            chunk_counter += 1
 
-                                # Throttled progress updates (every 10MB or on last chunk)
-                                if chunk_counter % progress_update_threshold == 0 or downloaded >= total_size:
-                                    download_progress[model_name]['downloaded'] = downloaded
-                                    if total_size > 0:
-                                        progress = (downloaded / total_size) * 100
-                                        download_progress[model_name]['progress'] = round(progress, 2)
+                            # Throttled progress updates (every 20MB or on last chunk)
+                            if chunk_counter % progress_update_threshold == 0 or downloaded >= total_size:
+                                download_progress[model_name]['downloaded'] = downloaded
+                                if total_size > 0:
+                                    progress = (downloaded / total_size) * 100
+                                    download_progress[model_name]['progress'] = round(progress, 2)
 
                     # Move temp file to final location
                     if os.path.exists(dest_path):
@@ -391,6 +408,12 @@ class MissingModelsExtension:
             # Clean up task reference
             if model_name in download_tasks:
                 del download_tasks[model_name]
+
+    async def cleanup(self):
+        """Clean up resources on shutdown"""
+        if self.session and not self.session.closed:
+            await self.session.close()
+            logging.info("[Download Missing Models] ClientSession closed")
 
 # Initialize the extension
 extension = MissingModelsExtension()
