@@ -11,8 +11,11 @@ class MissingModelsDialog extends ComfyDialog {
     constructor() {
         super();
         this.missingModels = [];
+        this.notFoundModels = [];
+        this.correctedModels = [];
         this.downloadingModels = new Set();
         this.progressInterval = null;
+        this.availableFolders = [];
 
         this.element = $el("div.comfy-modal", {
             id: 'missing-models-dialog',
@@ -97,6 +100,48 @@ class MissingModelsDialog extends ComfyDialog {
             })
         ]);
 
+        this.downloadAllButton = $el("button", {
+            textContent: "Download All",
+            className: "comfyui-button",
+            style: {
+                padding: '10px 24px',
+                backgroundColor: '#28a745',
+                color: '#fff',
+                border: 'none',
+                borderRadius: '4px',
+                cursor: 'pointer',
+                fontSize: '14px',
+                fontWeight: '500',
+                transition: 'all 0.2s ease',
+                boxShadow: '0 2px 4px rgba(40, 167, 69, 0.3)'
+            },
+            onmouseenter: (e) => {
+                if (!e.currentTarget.disabled) {
+                    e.currentTarget.style.backgroundColor = '#218838';
+                    e.currentTarget.style.transform = 'translateY(-1px)';
+                    e.currentTarget.style.boxShadow = '0 4px 8px rgba(40, 167, 69, 0.4)';
+                }
+            },
+            onmouseleave: (e) => {
+                if (!e.currentTarget.disabled) {
+                    e.currentTarget.style.backgroundColor = '#28a745';
+                    e.currentTarget.style.transform = 'translateY(0)';
+                    e.currentTarget.style.boxShadow = '0 2px 4px rgba(40, 167, 69, 0.3)';
+                }
+            },
+            onmousedown: (e) => {
+                if (!e.currentTarget.disabled) {
+                    e.currentTarget.style.transform = 'translateY(0) scale(0.98)';
+                }
+            },
+            onmouseup: (e) => {
+                if (!e.currentTarget.disabled) {
+                    e.currentTarget.style.transform = 'translateY(-1px) scale(1)';
+                }
+            },
+            onclick: () => this.downloadAllModels()
+        });
+
         this.buttonsElement = $el("div.button-bar", {
             style: {
                 padding: '15px',
@@ -107,39 +152,7 @@ class MissingModelsDialog extends ComfyDialog {
                 justifyContent: 'center'
             }
         }, [
-            $el("button", {
-                textContent: "Download All",
-                className: "comfyui-button",
-                style: {
-                    padding: '10px 24px',
-                    backgroundColor: '#28a745',
-                    color: '#fff',
-                    border: 'none',
-                    borderRadius: '4px',
-                    cursor: 'pointer',
-                    fontSize: '14px',
-                    fontWeight: '500',
-                    transition: 'all 0.2s ease',
-                    boxShadow: '0 2px 4px rgba(40, 167, 69, 0.3)'
-                },
-                onmouseenter: (e) => {
-                    e.currentTarget.style.backgroundColor = '#218838';
-                    e.currentTarget.style.transform = 'translateY(-1px)';
-                    e.currentTarget.style.boxShadow = '0 4px 8px rgba(40, 167, 69, 0.4)';
-                },
-                onmouseleave: (e) => {
-                    e.currentTarget.style.backgroundColor = '#28a745';
-                    e.currentTarget.style.transform = 'translateY(0)';
-                    e.currentTarget.style.boxShadow = '0 2px 4px rgba(40, 167, 69, 0.3)';
-                },
-                onmousedown: (e) => {
-                    e.currentTarget.style.transform = 'translateY(0) scale(0.98)';
-                },
-                onmouseup: (e) => {
-                    e.currentTarget.style.transform = 'translateY(-1px) scale(1)';
-                },
-                onclick: () => this.downloadAllModels()
-            }),
+            this.downloadAllButton,
             $el("button", {
                 textContent: "Close",
                 className: "comfyui-button",
@@ -193,9 +206,41 @@ class MissingModelsDialog extends ComfyDialog {
         ]);
     }
 
+    async loadAvailableFolders() {
+        try {
+            const response = await api.fetchApi('/download-missing/folders');
+            if (response.ok) {
+                const result = await response.json();
+                if (result.status === 'success') {
+                    this.availableFolders = result.folders || [];
+                    console.log(`[Missing Models] Loaded ${this.availableFolders.length} available folders`);
+                }
+            }
+        } catch (error) {
+            console.error("[Missing Models] Error loading folders:", error);
+            // Continue even if folder loading fails
+        }
+    }
+
     async scanWorkflow() {
         try {
-            this.updateStatus("Scanning workflow...", "info");
+            // Show progress bar
+            this.showScanProgress();
+
+            // Start polling for scan progress
+            const pollInterval = setInterval(async () => {
+                try {
+                    const progressResponse = await api.fetchApi('/download-missing/scan-progress');
+                    if (progressResponse.ok) {
+                        const progressResult = await progressResponse.json();
+                        if (progressResult.status === 'success' && progressResult.progress?.current) {
+                            this.updateScanProgress(progressResult.progress.current);
+                        }
+                    }
+                } catch (err) {
+                    console.error("[Missing Models] Progress poll error:", err);
+                }
+            }, 100);
 
             // Get current workflow
             const workflow = app.graph.serialize();
@@ -207,6 +252,9 @@ class MissingModelsDialog extends ComfyDialog {
                 body: JSON.stringify({ workflow })
             });
 
+            // Stop polling
+            clearInterval(pollInterval);
+
             if (!response.ok) {
                 throw new Error(`HTTP ${response.status}: ${response.statusText}`);
             }
@@ -215,15 +263,34 @@ class MissingModelsDialog extends ComfyDialog {
 
             if (result.status === 'success') {
                 this.missingModels = result.missing_models || [];
+                this.notFoundModels = result.not_found_models || [];
+                this.correctedModels = result.corrected_models || [];
+
+                // Apply corrections to the actual ComfyUI graph
+                if (this.correctedModels.length > 0) {
+                    this.applyCorrectionsToGraph(this.correctedModels);
+                }
+
                 this.displayModels();
 
-                if (this.missingModels.length === 0) {
+                // Build status message
+                const messages = [];
+                if (this.correctedModels.length > 0) {
+                    messages.push(`${this.correctedModels.length} model(s) found and corrected`);
+                }
+                if (this.missingModels.length > 0) {
+                    messages.push(`${this.missingModels.length} model(s) ready to download`);
+                }
+                if (this.notFoundModels.length > 0) {
+                    messages.push(`${this.notFoundModels.length} model(s) not found`);
+                }
+
+                if (messages.length === 0) {
                     this.updateStatus("No missing models found! All models are installed.", "success");
                 } else {
-                    this.updateStatus(
-                        `Found ${this.missingModels.length} missing model(s). Click 'Download All' to download them.`,
-                        "warning"
-                    );
+                    const statusMessage = messages.join(', ') + '.';
+                    const hasIssues = this.missingModels.length > 0 || this.notFoundModels.length > 0;
+                    this.updateStatus(statusMessage, hasIssues ? "warning" : "success");
                 }
             } else {
                 throw new Error(result.message || "Unknown error");
@@ -234,10 +301,173 @@ class MissingModelsDialog extends ComfyDialog {
         }
     }
 
+
+    applyCorrectionsToGraph(corrections) {
+        try {
+            let appliedCount = 0;
+            console.log(`[Missing Models] Applying ${corrections.length} corrections to graph...`);
+
+            for (const correction of corrections) {
+                // Find the node in the graph
+                const node = app.graph.getNodeById(correction.node_id);
+
+                if (!node) {
+                    console.warn(`[Missing Models] Node ${correction.node_id} not found in graph`);
+                    continue;
+                }
+
+                console.log(`[Missing Models] Processing ${correction.correction_type} correction for node ${correction.node_id} (${node.type})`);
+
+                if (correction.correction_type === 'widget') {
+                    // Handle widget corrections
+                    if (correction.widget_index === undefined) {
+                        console.warn(`[Missing Models] Widget correction missing widget_index`);
+                        continue;
+                    }
+
+                    // Update widgets_values array
+                    if (node.widgets_values && node.widgets_values[correction.widget_index] !== undefined) {
+                        const oldValue = node.widgets_values[correction.widget_index];
+                        node.widgets_values[correction.widget_index] = correction.new_path;
+                        console.log(`[Missing Models] ✓ Updated widgets_values[${correction.widget_index}]: "${oldValue}" -> "${correction.new_path}"`);
+                        appliedCount++;
+                    }
+
+                    // Also update the widget object if it exists
+                    if (node.widgets && node.widgets[correction.widget_index]) {
+                        node.widgets[correction.widget_index].value = correction.new_path;
+                        console.log(`[Missing Models] ✓ Updated widget object value`);
+                    }
+
+                } else if (correction.correction_type === 'property') {
+                    // Handle property corrections
+                    if (correction.property_index === undefined) {
+                        console.warn(`[Missing Models] Property correction missing property_index`);
+                        continue;
+                    }
+
+                    // Update properties.models array
+                    if (node.properties && node.properties.models && node.properties.models[correction.property_index]) {
+                        const oldValue = node.properties.models[correction.property_index].name;
+                        node.properties.models[correction.property_index].name = correction.new_path;
+                        console.log(`[Missing Models] ✓ Updated properties.models[${correction.property_index}].name: "${oldValue}" -> "${correction.new_path}"`);
+                        appliedCount++;
+                    }
+                }
+            }
+
+            // Force graph update and persistence
+            if (appliedCount > 0) {
+                app.graph.setDirtyCanvas(true, true);
+                app.graph.change();
+                console.log(`[Missing Models] ✓ Applied ${appliedCount} path corrections to workflow`);
+                console.log(`[Missing Models] ✓ Graph marked as modified and changes persisted`);
+            } else {
+                console.warn(`[Missing Models] No corrections were applied (0/${corrections.length})`);
+            }
+        } catch (error) {
+            console.error("[Missing Models] Error applying corrections:", error);
+        }
+    }
+
+    updateDownloadAllButtonState() {
+        // Check if there are any models ready to download (have URLs and not already completed)
+        const modelsReadyToDownload = this.missingModels.filter(m => {
+            const hasUrl = m.url && m.url.trim() !== '';
+            const notDownloading = !this.downloadingModels.has(m.name);
+            const notCompleted = !m._downloadButton || m._downloadButton.textContent !== "Completed";
+            return hasUrl && (notDownloading || notCompleted);
+        });
+
+        const hasModelsToDownload = modelsReadyToDownload.length > 0;
+
+        if (this.downloadAllButton) {
+            this.downloadAllButton.disabled = !hasModelsToDownload;
+            if (hasModelsToDownload) {
+                this.downloadAllButton.style.backgroundColor = '#28a745';
+                this.downloadAllButton.style.cursor = 'pointer';
+                this.downloadAllButton.style.opacity = '1';
+            } else {
+                this.downloadAllButton.style.backgroundColor = '#444';
+                this.downloadAllButton.style.cursor = 'not-allowed';
+                this.downloadAllButton.style.opacity = '0.5';
+            }
+        }
+    }
+
+    showScanProgress() {
+        // Clear existing content
+        this.modelsListElement.innerHTML = '';
+
+        // Create scan progress container
+        const progressContainer = $el("div", {
+            style: {
+                padding: '40px',
+                textAlign: 'center'
+            }
+        }, [
+            $el("div", {
+                textContent: "Scanning workflow...",
+                style: {
+                    fontSize: '16px',
+                    color: '#ddd',
+                    marginBottom: '20px'
+                }
+            }),
+            $el("div.progress-bar", {
+                style: {
+                    width: '100%',
+                    height: '8px',
+                    backgroundColor: '#333',
+                    borderRadius: '4px',
+                    overflow: 'hidden',
+                    position: 'relative'
+                }
+            }, [
+                $el("div.progress-fill", {
+                    style: {
+                        width: '0%',
+                        height: '100%',
+                        backgroundColor: '#6c9',
+                        transition: 'width 0.3s ease',
+                        borderRadius: '4px'
+                    }
+                })
+            ]),
+            $el("div", {
+                textContent: "Scanning workflow nodes...",
+                style: {
+                    fontSize: '13px',
+                    color: '#999',
+                    marginTop: '12px'
+                }
+            })
+        ]);
+
+        this._scanProgressContainer = progressContainer;
+        this._scanProgressFill = progressContainer.querySelector('.progress-fill');
+        this._scanProgressMessage = progressContainer.children[2];
+
+        this.modelsListElement.appendChild(progressContainer);
+    }
+
+    updateScanProgress(progress) {
+        if (this._scanProgressFill) {
+            this._scanProgressFill.style.width = `${progress.progress}%`;
+        }
+        if (this._scanProgressMessage) {
+            this._scanProgressMessage.textContent = progress.message || 'Scanning...';
+        }
+    }
+
     displayModels() {
         this.modelsListElement.innerHTML = '';
 
-        if (this.missingModels.length === 0) {
+        const hasAnyModels = this.missingModels.length > 0 ||
+                            this.notFoundModels.length > 0 ||
+                            this.correctedModels.length > 0;
+
+        if (!hasAnyModels) {
             this.modelsListElement.appendChild(
                 $el("div", {
                     textContent: "No missing models found",
@@ -250,13 +480,273 @@ class MissingModelsDialog extends ComfyDialog {
                     }
                 })
             );
+            this.updateDownloadAllButtonState();
             return;
         }
 
-        this.missingModels.forEach((model, index) => {
-            const modelCard = this.createModelCard(model, index);
-            this.modelsListElement.appendChild(modelCard);
-        });
+        // Display corrected models first if any
+        if (this.correctedModels.length > 0) {
+            this.modelsListElement.appendChild(this.createCorrectedModelsSection());
+        }
+
+        // Display missing models with URLs (ready to download)
+        if (this.missingModels.length > 0) {
+            if (this.correctedModels.length > 0) {
+                this.modelsListElement.appendChild($el("div", {
+                    style: { height: '1px', backgroundColor: '#444', margin: '20px 0' }
+                }));
+            }
+
+            this.modelsListElement.appendChild($el("h3", {
+                textContent: "Missing Models - Ready to Download",
+                style: {
+                    color: '#fff',
+                    fontSize: '16px',
+                    fontWeight: '600',
+                    marginBottom: '12px',
+                    marginTop: '0'
+                }
+            }));
+
+            this.missingModels.forEach((model, index) => {
+                const modelCard = this.createModelCard(model, index);
+                this.modelsListElement.appendChild(modelCard);
+            });
+        }
+
+        // Display models that couldn't be found
+        if (this.notFoundModels.length > 0) {
+            if (this.correctedModels.length > 0 || this.missingModels.length > 0) {
+                this.modelsListElement.appendChild($el("div", {
+                    style: { height: '1px', backgroundColor: '#444', margin: '20px 0' }
+                }));
+            }
+
+            this.modelsListElement.appendChild($el("h3", {
+                textContent: "Models Not Found",
+                style: {
+                    color: '#f66',
+                    fontSize: '16px',
+                    fontWeight: '600',
+                    marginBottom: '12px',
+                    marginTop: '0'
+                }
+            }));
+
+            this.notFoundModels.forEach((model) => {
+                const modelCard = this.createNotFoundModelCard(model);
+                this.modelsListElement.appendChild(modelCard);
+            });
+        }
+
+        // Update Download All button state after displaying models
+        this.updateDownloadAllButtonState();
+    }
+
+    createNotFoundModelCard(model) {
+        const card = $el("div.model-card", {
+            style: {
+                backgroundColor: '#3a2a2a',
+                padding: '16px',
+                marginBottom: '12px',
+                borderRadius: '6px',
+                border: '1px solid #844',
+                boxShadow: '0 2px 8px rgba(0, 0, 0, 0.3)',
+                opacity: '0.8'
+            }
+        }, [
+            $el("div", {
+                style: {
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'flex-start'
+                }
+            }, [
+                $el("div", {
+                    style: { flex: '1', marginRight: '15px' }
+                }, [
+                    $el("div", {
+                        textContent: model.name,
+                        style: {
+                            fontWeight: '600',
+                            color: '#fff',
+                            fontSize: '15px',
+                            marginBottom: '8px',
+                            wordBreak: 'break-word',
+                            lineHeight: '1.4',
+                            letterSpacing: '0.2px'
+                        }
+                    }),
+                    $el("div", {
+                        textContent: `Directory: ${model.directory || model.folder}`,
+                        style: {
+                            fontSize: '12px',
+                            color: '#888',
+                            marginBottom: '6px',
+                            lineHeight: '1.5',
+                            fontWeight: '400'
+                        }
+                    }),
+                    $el("div", {
+                        textContent: "Not found in workflow notes or popular repositories",
+                        style: {
+                            fontSize: '11px',
+                            color: '#f66',
+                            fontStyle: 'italic',
+                            lineHeight: '1.5',
+                            fontWeight: '400'
+                        }
+                    })
+                ]),
+                $el("button", {
+                    textContent: "Not Found",
+                    disabled: true,
+                    className: "comfyui-button",
+                    style: {
+                        padding: '8px 18px',
+                        backgroundColor: '#666',
+                        color: '#fff',
+                        border: 'none',
+                        borderRadius: '4px',
+                        cursor: 'not-allowed',
+                        fontSize: '13px',
+                        fontWeight: '500',
+                        opacity: '0.6'
+                    }
+                })
+            ])
+        ]);
+
+        return card;
+    }
+
+    createCorrectedModelsSection() {
+        const section = $el("div.corrected-models-section", {
+            style: {
+                marginBottom: '20px'
+            }
+        }, [
+            $el("h3", {
+                textContent: "✓ Found & Corrected Models",
+                style: {
+                    color: '#28a745',
+                    fontSize: '16px',
+                    fontWeight: '600',
+                    marginBottom: '12px',
+                    marginTop: '0'
+                }
+            }),
+            ...this.correctedModels.map(model => this.createCorrectedModelCard(model))
+        ]);
+
+        return section;
+    }
+
+    createCorrectedModelCard(model) {
+        // Build node info text
+        let nodeInfo = '';
+        if (model.node_id !== null && model.node_id !== undefined) {
+            nodeInfo = `Node #${model.node_id}`;
+            if (model.node_type && model.node_type !== 'metadata') {
+                nodeInfo += ` (${model.node_type})`;
+            }
+        } else if (model.node_type === 'metadata') {
+            nodeInfo = 'Workflow metadata';
+        }
+
+        const card = $el("div.corrected-model-card", {
+            style: {
+                backgroundColor: '#1a3a1a',
+                padding: '14px 16px',
+                marginBottom: '10px',
+                borderRadius: '6px',
+                border: '1px solid #2d5a2d',
+                boxShadow: '0 2px 6px rgba(40, 167, 69, 0.15)'
+            }
+        }, [
+            $el("div", {
+                style: {
+                    display: 'flex',
+                    alignItems: 'flex-start'
+                }
+            }, [
+                $el("div", {
+                    textContent: "✓",
+                    style: {
+                        color: '#28a745',
+                        fontSize: '18px',
+                        fontWeight: 'bold',
+                        marginRight: '12px',
+                        lineHeight: '1.4'
+                    }
+                }),
+                $el("div", {
+                    style: { flex: '1' }
+                }, [
+                    $el("div", {
+                        textContent: model.name,
+                        style: {
+                            fontWeight: '600',
+                            color: '#fff',
+                            fontSize: '14px',
+                            marginBottom: '6px',
+                            wordBreak: 'break-word',
+                            lineHeight: '1.4'
+                        }
+                    }),
+                    $el("div", {
+                        style: {
+                            fontSize: '11px',
+                            color: '#aaa',
+                            marginBottom: '4px',
+                            lineHeight: '1.5',
+                            fontFamily: 'monospace'
+                        }
+                    }, [
+                        $el("span", {
+                            textContent: `${model.old_path}`,
+                            style: {
+                                color: '#c88',
+                                textDecoration: 'line-through'
+                            }
+                        }),
+                        $el("span", {
+                            textContent: " → ",
+                            style: {
+                                color: '#888',
+                                margin: '0 4px'
+                            }
+                        }),
+                        $el("span", {
+                            textContent: `${model.new_path}`,
+                            style: {
+                                color: '#8c8'
+                            }
+                        })
+                    ]),
+                    $el("div", {
+                        textContent: `Directory: ${model.directory || model.folder}`,
+                        style: {
+                            fontSize: '11px',
+                            color: '#888',
+                            lineHeight: '1.5',
+                            marginBottom: nodeInfo ? '4px' : '0'
+                        }
+                    }),
+                    nodeInfo ? $el("div", {
+                        textContent: nodeInfo,
+                        style: {
+                            fontSize: '11px',
+                            color: '#6a6',
+                            lineHeight: '1.5',
+                            fontWeight: '500'
+                        }
+                    }) : null
+                ].filter(el => el !== null))
+            ])
+        ]);
+
+        return card;
     }
 
     createModelCard(model, index) {
@@ -297,20 +787,24 @@ class MissingModelsDialog extends ComfyDialog {
             }
         });
 
+        const needsFolderSelection = model.needs_folder_selection === true;
+        const canDownload = hasUrl && !needsFolderSelection;
+
         const downloadButton = $el("button", {
             textContent: hasUrl ? "Download" : "No URL",
-            disabled: !hasUrl,
+            disabled: !canDownload,
             style: {
                 padding: '8px 18px',
-                backgroundColor: hasUrl ? '#0066cc' : '#444',
+                backgroundColor: canDownload ? '#0066cc' : '#444',
                 color: '#fff',
                 border: 'none',
                 borderRadius: '4px',
-                cursor: hasUrl ? 'pointer' : 'not-allowed',
+                cursor: canDownload ? 'pointer' : 'not-allowed',
                 fontSize: '13px',
                 fontWeight: '500',
                 transition: 'all 0.2s ease',
-                boxShadow: hasUrl ? '0 2px 4px rgba(0, 102, 204, 0.3)' : 'none'
+                boxShadow: canDownload ? '0 2px 4px rgba(0, 102, 204, 0.3)' : 'none',
+                opacity: canDownload ? '1' : '0.6'
             },
             onmouseenter: (e) => {
                 if (hasUrl && !e.currentTarget.disabled) {
@@ -376,7 +870,7 @@ class MissingModelsDialog extends ComfyDialog {
                         }
                     }),
                     $el("div", {
-                        textContent: `Directory: models/${model.directory || model.folder}`,
+                        textContent: `Directory: ${model.directory || model.folder}`,
                         style: {
                             fontSize: '12px',
                             color: '#888',
@@ -405,9 +899,72 @@ class MissingModelsDialog extends ComfyDialog {
                             fontWeight: '400'
                         }
                     }),
+                    // Folder selector for models needing manual selection
+                    needsFolderSelection ? $el("div", {
+                        style: {
+                            marginTop: '10px',
+                            marginBottom: '8px',
+                            padding: '10px',
+                            backgroundColor: '#2a2a2a',
+                            borderRadius: '4px',
+                            border: '1px solid #fa4'
+                        }
+                    }, [
+                        $el("label", {
+                            textContent: "⚠️ Select installation folder:",
+                            style: {
+                                fontSize: '12px',
+                                color: '#fa4',
+                                display: 'block',
+                                marginBottom: '6px',
+                                fontWeight: '600'
+                            }
+                        }),
+                        $el("select", {
+                            style: {
+                                width: '100%',
+                                padding: '8px',
+                                backgroundColor: '#444',
+                                color: '#fff',
+                                border: '1px solid #666',
+                                borderRadius: '4px',
+                                fontSize: '13px',
+                                cursor: 'pointer'
+                            },
+                            onchange: (e) => {
+                                const selectedFolder = e.target.value;
+                                if (selectedFolder) {
+                                    model.folder = selectedFolder;
+                                    model.directory = selectedFolder;
+                                    model.needs_folder_selection = false;
+
+                                    // Re-enable download button
+                                    downloadButton.disabled = false;
+                                    downloadButton.style.backgroundColor = '#0066cc';
+                                    downloadButton.style.opacity = '1';
+                                    downloadButton.style.cursor = 'pointer';
+
+                                    console.log(`[Missing Models] Selected folder '${selectedFolder}' for ${model.name}`);
+                                }
+                            }
+                        }, [
+                            $el("option", {
+                                value: "",
+                                textContent: "-- Select destination folder --",
+                                disabled: true,
+                                selected: true
+                            }),
+                            ...this.availableFolders.map(folder =>
+                                $el("option", {
+                                    value: folder,
+                                    textContent: folder
+                                })
+                            )
+                        ])
+                    ]) : null,
                     progressBar,
                     statusText
-                ]),
+                ].filter(el => el !== null)),
                 downloadButton
             ])
         ]);
@@ -420,6 +977,7 @@ class MissingModelsDialog extends ComfyDialog {
 
         return card;
     }
+
 
     truncateUrl(url, maxLength = 60) {
         if (url.length <= maxLength) return url;
@@ -449,7 +1007,9 @@ class MissingModelsDialog extends ComfyDialog {
                 body: JSON.stringify({
                     model_name: model.name,
                     model_url: model.url,
-                    model_folder: model.folder
+                    model_folder: model.folder,
+                    expected_filename: model.expected_filename || model.name,  // What workflow needs
+                    actual_filename: model.actual_filename || model.name  // What HuggingFace has
                 })
             });
 
@@ -517,6 +1077,9 @@ class MissingModelsDialog extends ComfyDialog {
                         model._downloadButton.textContent = "Completed";
                         model._downloadButton.style.backgroundColor = '#28a745';
                         model._card.style.opacity = '0.7';
+
+                        // Update Download All button state
+                        this.updateDownloadAllButtonState();
                     } else if (progress.status === 'error') {
                         clearInterval(pollInterval);
                         this.downloadingModels.delete(model.name);
@@ -525,6 +1088,9 @@ class MissingModelsDialog extends ComfyDialog {
                         model._statusText.style.color = '#f44';
                         model._downloadButton.textContent = "Retry";
                         model._downloadButton.disabled = false;
+
+                        // Update Download All button state
+                        this.updateDownloadAllButtonState();
                     } else if (progress.status === 'cancelled') {
                         clearInterval(pollInterval);
                         this.downloadingModels.delete(model.name);
@@ -533,6 +1099,9 @@ class MissingModelsDialog extends ComfyDialog {
                         model._statusText.style.color = '#fa4';
                         model._downloadButton.textContent = "Download";
                         model._downloadButton.disabled = false;
+
+                        // Update Download All button state
+                        this.updateDownloadAllButtonState();
                     }
                 }
             } catch (error) {
@@ -587,14 +1156,18 @@ class MissingModelsDialog extends ComfyDialog {
         );
     }
 
-    show() {
+    async show() {
+        // Show dialog immediately to display progress
         this.element.style.display = "block";
-        // Fade in animation
         setTimeout(() => {
             this.element.style.opacity = "1";
         }, 10);
-        // Automatically scan workflow when dialog opens
-        this.scanWorkflow();
+
+        // Load available folders first
+        await this.loadAvailableFolders();
+
+        // Scan workflow and show progress
+        await this.scanWorkflow();
     }
 
     close() {
