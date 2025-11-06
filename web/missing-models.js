@@ -4,6 +4,305 @@ import { $el, ComfyDialog } from "../../scripts/ui.js";
 import { ComfyButton } from "../../scripts/ui/components/button.js";
 import { ComfyButtonGroup } from "../../scripts/ui/components/buttonGroup.js";
 
+// Color constants
+const COLORS = {
+    PRIMARY_GREEN: '#28a745',
+    PRIMARY_GREEN_HOVER: '#218838',
+    PRIMARY_GREEN_ACTIVE: '#1e7e34',
+    PRIMARY_BLUE: '#0066cc',
+    PRIMARY_BLUE_HOVER: '#0052a3',
+    PRIMARY_BLUE_ACTIVE: '#004080',
+    ERROR_RED: '#f44',
+    WARNING_ORANGE: '#fa4',
+    DARK_BG: '#1a1a1a',
+    BORDER_GRAY: '#444',
+    DARK_GRAY: '#444',
+    MEDIUM_GRAY: '#666',
+    LIGHT_GRAY: '#aaa',
+    TEXT_WHITE: '#fff',
+    TEXT_LIGHT: '#ddd',
+    TEXT_MEDIUM: '#999',
+    PROGRESS_GREEN: '#6c9',
+    SHADOW: 'rgba(0,0,0,0.5)'
+};
+
+// Common style objects
+const STYLES = {
+    heading: {
+        fontWeight: '600',
+        color: COLORS.TEXT_WHITE,
+        fontSize: '15px',
+        marginBottom: '8px',
+        wordBreak: 'break-word',
+        lineHeight: '1.4',
+        letterSpacing: '0.2px'
+    },
+    subheading: {
+        fontSize: '13px',
+        color: COLORS.LIGHT_GRAY,
+        marginBottom: '12px',
+        wordBreak: 'break-word',
+        lineHeight: '1.5'
+    },
+    button: {
+        padding: '8px 16px',
+        border: 'none',
+        borderRadius: '4px',
+        cursor: 'pointer',
+        fontSize: '14px',
+        fontWeight: '500',
+        transition: 'all 0.2s ease',
+        display: 'flex',
+        alignItems: 'center',
+        gap: '6px'
+    }
+};
+
+// Scan progress configuration
+const SCAN_PROGRESS = {
+    NODES_WEIGHT: 33,           // Progress percentage for node scanning
+    METADATA_WEIGHT: 33,        // Progress percentage for metadata checking
+    URL_RESOLUTION_WEIGHT: 34,  // Progress percentage for URL resolution
+    POLL_INTERVAL: 500,         // Polling interval in milliseconds
+    DOWNLOAD_DELAY: 1000        // Delay before starting downloads
+};
+
+// Status type constants
+const STATUS_TYPES = {
+    INFO: 'info',
+    SUCCESS: 'success',
+    WARNING: 'warning',
+    ERROR: 'error'
+};
+
+// Status color mapping
+const STATUS_COLORS = {
+    [STATUS_TYPES.INFO]: COLORS.PROGRESS_GREEN,
+    [STATUS_TYPES.SUCCESS]: COLORS.PROGRESS_GREEN,
+    [STATUS_TYPES.WARNING]: COLORS.WARNING_ORANGE,
+    [STATUS_TYPES.ERROR]: COLORS.ERROR_RED
+};
+
+// Dialog dimensions
+const DIALOG_DIMENSIONS = {
+    WIDTH: '900px',
+    MAX_HEIGHT: '80vh',
+    HEADER_FOOTER_HEIGHT: 250
+};
+
+/**
+ * Create a styled button with hover effects
+ * @param {string} text - Button text
+ * @param {object} options - Button configuration
+ * @param {string} options.color - Base background color
+ * @param {string} options.hoverColor - Hover state color
+ * @param {string} options.activeColor - Active state color
+ * @param {function} options.onClick - Click handler
+ * @param {object} options.extraStyles - Additional styles to merge
+ * @returns {HTMLElement} Button element
+ */
+function createStyledButton(text, options = {}) {
+    const {
+        color,
+        hoverColor,
+        activeColor,
+        onClick,
+        extraStyles = {}
+    } = options;
+
+    const button = $el("button", {
+        textContent: text,
+        style: {
+            ...STYLES.button,
+            backgroundColor: color,
+            color: COLORS.TEXT_WHITE,
+            ...extraStyles
+        }
+    });
+
+    // Mouse event handlers for hover effects
+    button.addEventListener('mouseenter', (e) => {
+        if (!e.currentTarget.disabled) {
+            e.currentTarget.style.backgroundColor = hoverColor;
+            e.currentTarget.style.transform = 'translateY(-1px)';
+            e.currentTarget.style.boxShadow = `0 4px 8px ${COLORS.SHADOW}`;
+        }
+    });
+
+    button.addEventListener('mouseleave', (e) => {
+        if (!e.currentTarget.disabled) {
+            e.currentTarget.style.backgroundColor = color;
+            e.currentTarget.style.transform = 'translateY(0)';
+            e.currentTarget.style.boxShadow = 'none';
+        }
+    });
+
+    button.addEventListener('mousedown', (e) => {
+        if (!e.currentTarget.disabled) {
+            e.currentTarget.style.backgroundColor = activeColor;
+            e.currentTarget.style.transform = 'translateY(0)';
+        }
+    });
+
+    button.addEventListener('mouseup', (e) => {
+        if (!e.currentTarget.disabled) {
+            e.currentTarget.style.backgroundColor = hoverColor;
+            e.currentTarget.style.transform = 'translateY(-1px)';
+        }
+    });
+
+    if (onClick) {
+        button.addEventListener('click', onClick);
+    }
+
+    return button;
+}
+
+/**
+ * Poll an endpoint repeatedly until a stop condition is met
+ * @param {string} url - Endpoint URL to poll
+ * @param {function} onUpdate - Callback with response data: (data) => void
+ * @param {function} shouldStop - Function to check if polling should stop: (data) => boolean
+ * @param {number} interval - Polling interval in milliseconds (default: 100)
+ * @param {function} onError - Optional error handler: (error) => void
+ * @returns {function} Stop function to manually cancel polling
+ */
+function pollEndpoint(url, onUpdate, shouldStop, interval = 100, onError = null) {
+    const pollInterval = setInterval(async () => {
+        try {
+            const response = await api.fetchApi(url);
+
+            if (!response.ok) {
+                clearInterval(pollInterval);
+                if (onError) {
+                    onError(new Error(`HTTP ${response.status}`));
+                }
+                return;
+            }
+
+            const data = await response.json();
+            onUpdate(data);
+
+            if (shouldStop(data)) {
+                clearInterval(pollInterval);
+            }
+        } catch (err) {
+            if (onError) {
+                onError(err);
+            } else {
+                console.error("[Polling Error]", err);
+            }
+        }
+    }, interval);
+
+    // Return stop function
+    return () => clearInterval(pollInterval);
+}
+
+/**
+ * Create a model card with consistent structure
+ * @param {object} config - Card configuration
+ * @param {string} config.model - Model data
+ * @param {string} config.type - Card type: 'downloadable', 'not_found', 'corrected'
+ * @param {object} config.styling - Custom styling overrides
+ * @param {array} config.infoItems - Additional info items to display
+ * @param {HTMLElement} config.actionElement - Action button or indicator
+ * @param {array} config.extraElements - Additional elements to append
+ * @returns {HTMLElement} Card element
+ */
+function createModelCardBase(config) {
+    const {
+        model,
+        type = 'downloadable',
+        styling = {},
+        infoItems = [],
+        actionElement = null,
+        extraElements = []
+    } = config;
+
+    // Type-specific default styling
+    const typeStyles = {
+        downloadable: {
+            backgroundColor: '#333',
+            border: '1px solid #444',
+            opacity: '1'
+        },
+        not_found: {
+            backgroundColor: '#3a2a2a',
+            border: '1px solid #844',
+            opacity: '0.8'
+        },
+        corrected: {
+            backgroundColor: '#1a3a1a',
+            border: '1px solid #2d5a2d',
+            boxShadow: '0 2px 6px rgba(40, 167, 69, 0.15)'
+        }
+    };
+
+    const cardStyle = {
+        padding: '16px',
+        marginBottom: '12px',
+        borderRadius: '6px',
+        boxShadow: '0 2px 8px rgba(0, 0, 0, 0.3)',
+        ...typeStyles[type],
+        ...styling
+    };
+
+    // Build info section
+    const infoSection = $el("div", {
+        style: { flex: '1', marginRight: '15px' }
+    }, [
+        // Model name
+        $el("div", {
+            textContent: model.name,
+            style: {
+                ...STYLES.heading,
+                fontSize: type === 'corrected' ? '14px' : '15px',
+                marginBottom: type === 'corrected' ? '6px' : '8px'
+            }
+        }),
+        // Info items
+        ...infoItems
+    ]);
+
+    // Main content structure
+    const contentChildren = type === 'corrected' ?
+        [
+            $el("div", {
+                textContent: "✓",
+                style: {
+                    color: COLORS.PRIMARY_GREEN,
+                    fontSize: '18px',
+                    fontWeight: 'bold',
+                    marginRight: '12px',
+                    lineHeight: '1.4'
+                }
+            }),
+            $el("div", { style: { flex: '1' } }, [
+                infoSection,
+                ...extraElements
+            ])
+        ] :
+        [
+            infoSection,
+            actionElement
+        ].filter(el => el !== null);
+
+    const mainContent = $el("div", {
+        style: {
+            display: 'flex',
+            justifyContent: type === 'corrected' ? 'flex-start' : 'space-between',
+            alignItems: 'flex-start'
+        }
+    }, contentChildren);
+
+    const card = $el(`div.${type === 'corrected' ? 'corrected-' : ''}model-card`, {
+        style: cardStyle
+    }, [mainContent, ...extraElements].filter(el => el !== null));
+
+    return card;
+}
+
 /**
  * Dialog for displaying and downloading missing models
  */
@@ -21,8 +320,8 @@ class MissingModelsDialog extends ComfyDialog {
             id: 'missing-models-dialog',
             parent: document.body,
             style: {
-                width: '900px',
-                maxHeight: '80vh',
+                width: DIALOG_DIMENSIONS.WIDTH,
+                maxHeight: DIALOG_DIMENSIONS.MAX_HEIGHT,
                 overflow: 'hidden',
                 display: 'none',
                 zIndex: 1000,
@@ -83,7 +382,7 @@ class MissingModelsDialog extends ComfyDialog {
         this.modelsListElement = $el("div.models-list", {
             style: {
                 padding: '16px 20px',
-                maxHeight: 'calc(80vh - 250px)',
+                maxHeight: `calc(${DIALOG_DIMENSIONS.MAX_HEIGHT} - ${DIALOG_DIMENSIONS.HEADER_FOOTER_HEIGHT}px)`,
                 overflowY: 'auto',
                 backgroundColor: '#2a2a2a'
             }
@@ -100,47 +399,17 @@ class MissingModelsDialog extends ComfyDialog {
             })
         ]);
 
-        this.downloadAllButton = $el("button", {
-            textContent: "Download All",
-            className: "comfyui-button",
-            style: {
+        this.downloadAllButton = createStyledButton("Download All", {
+            color: COLORS.PRIMARY_GREEN,
+            hoverColor: COLORS.PRIMARY_GREEN_HOVER,
+            activeColor: COLORS.PRIMARY_GREEN_ACTIVE,
+            onClick: () => this.downloadAllModels(),
+            extraStyles: {
                 padding: '10px 24px',
-                backgroundColor: '#28a745',
-                color: '#fff',
-                border: 'none',
-                borderRadius: '4px',
-                cursor: 'pointer',
-                fontSize: '14px',
-                fontWeight: '500',
-                transition: 'all 0.2s ease',
                 boxShadow: '0 2px 4px rgba(40, 167, 69, 0.3)'
-            },
-            onmouseenter: (e) => {
-                if (!e.currentTarget.disabled) {
-                    e.currentTarget.style.backgroundColor = '#218838';
-                    e.currentTarget.style.transform = 'translateY(-1px)';
-                    e.currentTarget.style.boxShadow = '0 4px 8px rgba(40, 167, 69, 0.4)';
-                }
-            },
-            onmouseleave: (e) => {
-                if (!e.currentTarget.disabled) {
-                    e.currentTarget.style.backgroundColor = '#28a745';
-                    e.currentTarget.style.transform = 'translateY(0)';
-                    e.currentTarget.style.boxShadow = '0 2px 4px rgba(40, 167, 69, 0.3)';
-                }
-            },
-            onmousedown: (e) => {
-                if (!e.currentTarget.disabled) {
-                    e.currentTarget.style.transform = 'translateY(0) scale(0.98)';
-                }
-            },
-            onmouseup: (e) => {
-                if (!e.currentTarget.disabled) {
-                    e.currentTarget.style.transform = 'translateY(-1px) scale(1)';
-                }
-            },
-            onclick: () => this.downloadAllModels()
+            }
         });
+        this.downloadAllButton.className = "comfyui-button";
 
         this.buttonsElement = $el("div.button-bar", {
             style: {
@@ -153,39 +422,20 @@ class MissingModelsDialog extends ComfyDialog {
             }
         }, [
             this.downloadAllButton,
-            $el("button", {
-                textContent: "Close",
-                className: "comfyui-button",
-                style: {
-                    padding: '10px 24px',
-                    backgroundColor: '#666',
-                    color: '#fff',
-                    border: 'none',
-                    borderRadius: '4px',
-                    cursor: 'pointer',
-                    fontSize: '14px',
-                    fontWeight: '500',
-                    transition: 'all 0.2s ease',
-                    boxShadow: '0 2px 4px rgba(0, 0, 0, 0.2)'
-                },
-                onmouseenter: (e) => {
-                    e.currentTarget.style.backgroundColor = '#555';
-                    e.currentTarget.style.transform = 'translateY(-1px)';
-                    e.currentTarget.style.boxShadow = '0 4px 8px rgba(0, 0, 0, 0.3)';
-                },
-                onmouseleave: (e) => {
-                    e.currentTarget.style.backgroundColor = '#666';
-                    e.currentTarget.style.transform = 'translateY(0)';
-                    e.currentTarget.style.boxShadow = '0 2px 4px rgba(0, 0, 0, 0.2)';
-                },
-                onmousedown: (e) => {
-                    e.currentTarget.style.transform = 'translateY(0) scale(0.98)';
-                },
-                onmouseup: (e) => {
-                    e.currentTarget.style.transform = 'translateY(-1px) scale(1)';
-                },
-                onclick: () => this.close()
-            })
+            (() => {
+                const closeButton = createStyledButton("Close", {
+                    color: COLORS.MEDIUM_GRAY,
+                    hoverColor: '#555',
+                    activeColor: '#444',
+                    onClick: () => this.close(),
+                    extraStyles: {
+                        padding: '10px 24px',
+                        boxShadow: '0 2px 4px rgba(0, 0, 0, 0.2)'
+                    }
+                });
+                closeButton.className = "comfyui-button";
+                return closeButton;
+            })()
         ]);
 
         return $el("div.comfy-modal-content", {
@@ -228,19 +478,17 @@ class MissingModelsDialog extends ComfyDialog {
             this.showScanProgress();
 
             // Start polling for scan progress
-            const pollInterval = setInterval(async () => {
-                try {
-                    const progressResponse = await api.fetchApi('/download-missing/scan-progress');
-                    if (progressResponse.ok) {
-                        const progressResult = await progressResponse.json();
-                        if (progressResult.status === 'success' && progressResult.progress?.current) {
-                            this.updateScanProgress(progressResult.progress.current);
-                        }
+            const stopPolling = pollEndpoint(
+                '/download-missing/scan-progress',
+                (data) => {
+                    if (data.status === 'success' && data.progress?.current) {
+                        this.updateScanProgress(data.progress.current);
                     }
-                } catch (err) {
-                    console.error("[Missing Models] Progress poll error:", err);
-                }
-            }, 100);
+                },
+                () => false, // Never stop on its own - we'll stop it manually
+                100,
+                (err) => console.error("[Missing Models] Progress poll error:", err)
+            );
 
             // Get current workflow
             const workflow = app.graph.serialize();
@@ -253,7 +501,7 @@ class MissingModelsDialog extends ComfyDialog {
             });
 
             // Stop polling
-            clearInterval(pollInterval);
+            stopPolling();
 
             if (!response.ok) {
                 throw new Error(`HTTP ${response.status}: ${response.statusText}`);
@@ -286,18 +534,18 @@ class MissingModelsDialog extends ComfyDialog {
                 }
 
                 if (messages.length === 0) {
-                    this.updateStatus("No missing models found! All models are installed.", "success");
+                    this.updateStatus("No missing models found! All models are installed.", STATUS_TYPES.SUCCESS);
                 } else {
                     const statusMessage = messages.join(', ') + '.';
                     const hasIssues = this.missingModels.length > 0 || this.notFoundModels.length > 0;
-                    this.updateStatus(statusMessage, hasIssues ? "warning" : "success");
+                    this.updateStatus(statusMessage, hasIssues ? STATUS_TYPES.WARNING : STATUS_TYPES.SUCCESS);
                 }
             } else {
                 throw new Error(result.message || "Unknown error");
             }
         } catch (error) {
             console.error("[Missing Models] Scan error:", error);
-            this.updateStatus(`Error scanning workflow: ${error.message}`, "error");
+            this.updateStatus(`Error scanning workflow: ${error.message}`, STATUS_TYPES.ERROR);
         }
     }
 
@@ -384,11 +632,11 @@ class MissingModelsDialog extends ComfyDialog {
         if (this.downloadAllButton) {
             this.downloadAllButton.disabled = !hasModelsToDownload;
             if (hasModelsToDownload) {
-                this.downloadAllButton.style.backgroundColor = '#28a745';
+                this.downloadAllButton.style.backgroundColor = COLORS.PRIMARY_GREEN;
                 this.downloadAllButton.style.cursor = 'pointer';
                 this.downloadAllButton.style.opacity = '1';
             } else {
-                this.downloadAllButton.style.backgroundColor = '#444';
+                this.downloadAllButton.style.backgroundColor = COLORS.DARK_GRAY;
                 this.downloadAllButton.style.cursor = 'not-allowed';
                 this.downloadAllButton.style.opacity = '0.5';
             }
@@ -544,80 +792,52 @@ class MissingModelsDialog extends ComfyDialog {
     }
 
     createNotFoundModelCard(model) {
-        const card = $el("div.model-card", {
-            style: {
-                backgroundColor: '#3a2a2a',
-                padding: '16px',
-                marginBottom: '12px',
-                borderRadius: '6px',
-                border: '1px solid #844',
-                boxShadow: '0 2px 8px rgba(0, 0, 0, 0.3)',
-                opacity: '0.8'
-            }
-        }, [
+        const infoItems = [
             $el("div", {
+                textContent: `Directory: ${model.directory || model.folder}`,
                 style: {
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'flex-start'
+                    fontSize: '12px',
+                    color: COLORS.MEDIUM_GRAY,
+                    marginBottom: '6px',
+                    lineHeight: '1.5',
+                    fontWeight: '400'
                 }
-            }, [
-                $el("div", {
-                    style: { flex: '1', marginRight: '15px' }
-                }, [
-                    $el("div", {
-                        textContent: model.name,
-                        style: {
-                            fontWeight: '600',
-                            color: '#fff',
-                            fontSize: '15px',
-                            marginBottom: '8px',
-                            wordBreak: 'break-word',
-                            lineHeight: '1.4',
-                            letterSpacing: '0.2px'
-                        }
-                    }),
-                    $el("div", {
-                        textContent: `Directory: ${model.directory || model.folder}`,
-                        style: {
-                            fontSize: '12px',
-                            color: '#888',
-                            marginBottom: '6px',
-                            lineHeight: '1.5',
-                            fontWeight: '400'
-                        }
-                    }),
-                    $el("div", {
-                        textContent: "Not found in workflow notes or popular repositories",
-                        style: {
-                            fontSize: '11px',
-                            color: '#f66',
-                            fontStyle: 'italic',
-                            lineHeight: '1.5',
-                            fontWeight: '400'
-                        }
-                    })
-                ]),
-                $el("button", {
-                    textContent: "Not Found",
-                    disabled: true,
-                    className: "comfyui-button",
-                    style: {
-                        padding: '8px 18px',
-                        backgroundColor: '#666',
-                        color: '#fff',
-                        border: 'none',
-                        borderRadius: '4px',
-                        cursor: 'not-allowed',
-                        fontSize: '13px',
-                        fontWeight: '500',
-                        opacity: '0.6'
-                    }
-                })
-            ])
-        ]);
+            }),
+            $el("div", {
+                textContent: "Not found in workflow notes or popular repositories",
+                style: {
+                    fontSize: '11px',
+                    color: '#f66',
+                    fontStyle: 'italic',
+                    lineHeight: '1.5',
+                    fontWeight: '400'
+                }
+            })
+        ];
 
-        return card;
+        const actionElement = (() => {
+            const btn = createStyledButton("Not Found", {
+                color: COLORS.MEDIUM_GRAY,
+                hoverColor: COLORS.MEDIUM_GRAY,
+                activeColor: COLORS.MEDIUM_GRAY,
+                extraStyles: {
+                    padding: '8px 18px',
+                    fontSize: '13px',
+                    cursor: 'not-allowed',
+                    opacity: '0.6'
+                }
+            });
+            btn.disabled = true;
+            btn.className = "comfyui-button";
+            return btn;
+        })();
+
+        return createModelCardBase({
+            model,
+            type: 'not_found',
+            infoItems,
+            actionElement
+        });
     }
 
     createCorrectedModelsSection() {
@@ -654,99 +874,69 @@ class MissingModelsDialog extends ComfyDialog {
             nodeInfo = 'Workflow metadata';
         }
 
-        const card = $el("div.corrected-model-card", {
-            style: {
-                backgroundColor: '#1a3a1a',
-                padding: '14px 16px',
-                marginBottom: '10px',
-                borderRadius: '6px',
-                border: '1px solid #2d5a2d',
-                boxShadow: '0 2px 6px rgba(40, 167, 69, 0.15)'
-            }
-        }, [
+        const infoItems = [
+            // Old → New path display
             $el("div", {
                 style: {
-                    display: 'flex',
-                    alignItems: 'flex-start'
+                    fontSize: '11px',
+                    color: COLORS.LIGHT_GRAY,
+                    marginBottom: '4px',
+                    lineHeight: '1.5',
+                    fontFamily: 'monospace'
                 }
             }, [
-                $el("div", {
-                    textContent: "✓",
+                $el("span", {
+                    textContent: `${model.old_path}`,
                     style: {
-                        color: '#28a745',
-                        fontSize: '18px',
-                        fontWeight: 'bold',
-                        marginRight: '12px',
-                        lineHeight: '1.4'
+                        color: '#c88',
+                        textDecoration: 'line-through'
                     }
                 }),
-                $el("div", {
-                    style: { flex: '1' }
-                }, [
-                    $el("div", {
-                        textContent: model.name,
-                        style: {
-                            fontWeight: '600',
-                            color: '#fff',
-                            fontSize: '14px',
-                            marginBottom: '6px',
-                            wordBreak: 'break-word',
-                            lineHeight: '1.4'
-                        }
-                    }),
-                    $el("div", {
-                        style: {
-                            fontSize: '11px',
-                            color: '#aaa',
-                            marginBottom: '4px',
-                            lineHeight: '1.5',
-                            fontFamily: 'monospace'
-                        }
-                    }, [
-                        $el("span", {
-                            textContent: `${model.old_path}`,
-                            style: {
-                                color: '#c88',
-                                textDecoration: 'line-through'
-                            }
-                        }),
-                        $el("span", {
-                            textContent: " → ",
-                            style: {
-                                color: '#888',
-                                margin: '0 4px'
-                            }
-                        }),
-                        $el("span", {
-                            textContent: `${model.new_path}`,
-                            style: {
-                                color: '#8c8'
-                            }
-                        })
-                    ]),
-                    $el("div", {
-                        textContent: `Directory: ${model.directory || model.folder}`,
-                        style: {
-                            fontSize: '11px',
-                            color: '#888',
-                            lineHeight: '1.5',
-                            marginBottom: nodeInfo ? '4px' : '0'
-                        }
-                    }),
-                    nodeInfo ? $el("div", {
-                        textContent: nodeInfo,
-                        style: {
-                            fontSize: '11px',
-                            color: '#6a6',
-                            lineHeight: '1.5',
-                            fontWeight: '500'
-                        }
-                    }) : null
-                ].filter(el => el !== null))
-            ])
-        ]);
+                $el("span", {
+                    textContent: " → ",
+                    style: {
+                        color: COLORS.MEDIUM_GRAY,
+                        margin: '0 4px'
+                    }
+                }),
+                $el("span", {
+                    textContent: `${model.new_path}`,
+                    style: {
+                        color: '#8c8'
+                    }
+                })
+            ]),
+            // Directory
+            $el("div", {
+                textContent: `Directory: ${model.directory || model.folder}`,
+                style: {
+                    fontSize: '11px',
+                    color: COLORS.MEDIUM_GRAY,
+                    lineHeight: '1.5',
+                    marginBottom: nodeInfo ? '4px' : '0'
+                }
+            }),
+            // Node info (if available)
+            nodeInfo ? $el("div", {
+                textContent: nodeInfo,
+                style: {
+                    fontSize: '11px',
+                    color: '#6a6',
+                    lineHeight: '1.5',
+                    fontWeight: '500'
+                }
+            }) : null
+        ].filter(el => el !== null);
 
-        return card;
+        return createModelCardBase({
+            model,
+            type: 'corrected',
+            styling: {
+                padding: '14px 16px',
+                marginBottom: '10px'
+            },
+            infoItems
+        });
     }
 
     createModelCard(model, index) {
@@ -756,7 +946,7 @@ class MissingModelsDialog extends ComfyDialog {
             style: {
                 width: '100%',
                 height: '6px',
-                backgroundColor: '#444',
+                backgroundColor: COLORS.DARK_GRAY,
                 borderRadius: '3px',
                 marginTop: '8px',
                 overflow: 'hidden',
@@ -768,7 +958,7 @@ class MissingModelsDialog extends ComfyDialog {
                 style: {
                     width: '0%',
                     height: '100%',
-                    background: 'linear-gradient(90deg, #0066cc 0%, #00A0E3 100%)',
+                    background: `linear-gradient(90deg, ${COLORS.PRIMARY_BLUE} 0%, #00A0E3 100%)`,
                     transition: 'width 0.3s ease',
                     boxShadow: '0 0 10px rgba(0, 102, 204, 0.5)',
                     animation: 'none'
@@ -779,7 +969,7 @@ class MissingModelsDialog extends ComfyDialog {
         const statusText = $el("div.status-text", {
             style: {
                 fontSize: '12px',
-                color: '#aaa',
+                color: COLORS.LIGHT_GRAY,
                 marginTop: '6px',
                 display: 'none',
                 lineHeight: '1.5',
@@ -790,52 +980,24 @@ class MissingModelsDialog extends ComfyDialog {
         const needsFolderSelection = model.needs_folder_selection === true;
         const canDownload = hasUrl && !needsFolderSelection;
 
-        const downloadButton = $el("button", {
-            textContent: hasUrl ? "Download" : "No URL",
-            disabled: !canDownload,
-            style: {
-                padding: '8px 18px',
-                backgroundColor: canDownload ? '#0066cc' : '#444',
-                color: '#fff',
-                border: 'none',
-                borderRadius: '4px',
-                cursor: canDownload ? 'pointer' : 'not-allowed',
-                fontSize: '13px',
-                fontWeight: '500',
-                transition: 'all 0.2s ease',
-                boxShadow: canDownload ? '0 2px 4px rgba(0, 102, 204, 0.3)' : 'none',
-                opacity: canDownload ? '1' : '0.6'
-            },
-            onmouseenter: (e) => {
-                if (hasUrl && !e.currentTarget.disabled) {
-                    e.currentTarget.style.backgroundColor = '#0052a3';
-                    e.currentTarget.style.transform = 'translateY(-1px)';
-                    e.currentTarget.style.boxShadow = '0 4px 8px rgba(0, 102, 204, 0.4)';
-                }
-            },
-            onmouseleave: (e) => {
-                if (hasUrl && !e.currentTarget.disabled) {
-                    e.currentTarget.style.backgroundColor = '#0066cc';
-                    e.currentTarget.style.transform = 'translateY(0)';
-                    e.currentTarget.style.boxShadow = '0 2px 4px rgba(0, 102, 204, 0.3)';
-                }
-            },
-            onmousedown: (e) => {
-                if (hasUrl && !e.currentTarget.disabled) {
-                    e.currentTarget.style.transform = 'translateY(0) scale(0.98)';
-                }
-            },
-            onmouseup: (e) => {
-                if (hasUrl && !e.currentTarget.disabled) {
-                    e.currentTarget.style.transform = 'translateY(-1px) scale(1)';
-                }
-            },
-            onclick: async () => {
+        const downloadButton = createStyledButton(hasUrl ? "Download" : "No URL", {
+            color: canDownload ? COLORS.PRIMARY_BLUE : COLORS.DARK_GRAY,
+            hoverColor: COLORS.PRIMARY_BLUE_HOVER,
+            activeColor: COLORS.PRIMARY_BLUE_ACTIVE,
+            onClick: async () => {
                 if (hasUrl) {
                     await this.downloadModel(model, progressBar, statusText, downloadButton);
                 }
+            },
+            extraStyles: {
+                padding: '8px 18px',
+                fontSize: '13px',
+                cursor: canDownload ? 'pointer' : 'not-allowed',
+                boxShadow: canDownload ? '0 2px 4px rgba(0, 102, 204, 0.3)' : 'none',
+                opacity: canDownload ? '1' : '0.6'
             }
         });
+        downloadButton.disabled = !canDownload;
 
         const card = $el("div.model-card", {
             style: {
@@ -873,7 +1035,7 @@ class MissingModelsDialog extends ComfyDialog {
                         textContent: `Directory: ${model.directory || model.folder}`,
                         style: {
                             fontSize: '12px',
-                            color: '#888',
+                            color: COLORS.MEDIUM_GRAY,
                             marginBottom: '6px',
                             lineHeight: '1.5',
                             fontWeight: '400'
@@ -884,7 +1046,7 @@ class MissingModelsDialog extends ComfyDialog {
                         title: model.url,
                         style: {
                             fontSize: '11px',
-                            color: '#666',
+                            color: COLORS.MEDIUM_GRAY,
                             fontFamily: 'monospace',
                             lineHeight: '1.5',
                             fontWeight: '400'
@@ -940,7 +1102,7 @@ class MissingModelsDialog extends ComfyDialog {
 
                                     // Re-enable download button
                                     downloadButton.disabled = false;
-                                    downloadButton.style.backgroundColor = '#0066cc';
+                                    downloadButton.style.backgroundColor = COLORS.PRIMARY_BLUE;
                                     downloadButton.style.opacity = '1';
                                     downloadButton.style.cursor = 'pointer';
 
@@ -1044,23 +1206,16 @@ class MissingModelsDialog extends ComfyDialog {
     }
 
     async pollProgress(model) {
-        const pollInterval = setInterval(async () => {
-            try {
-                const pollKey = model.expected_filename || model.name;
-                const response = await api.fetchApi(`/download-missing/status/${encodeURIComponent(pollKey)}`);
+        const pollKey = model.expected_filename || model.name;
+        const progressFill = model._progressBar.querySelector('.progress-fill');
 
-                if (!response.ok) {
-                    clearInterval(pollInterval);
-                    return;
-                }
-
-                const result = await response.json();
-
-                if (result.status === 'success' && result.progress) {
-                    const progress = result.progress;
+        pollEndpoint(
+            `/download-missing/status/${encodeURIComponent(pollKey)}`,
+            (data) => {
+                if (data.status === 'success' && data.progress) {
+                    const progress = data.progress;
 
                     // Update progress bar
-                    const progressFill = model._progressBar.querySelector('.progress-fill');
                     if (progressFill) {
                         progressFill.style.width = `${progress.progress}%`;
                     }
@@ -1070,13 +1225,12 @@ class MissingModelsDialog extends ComfyDialog {
                         const downloadedMB = (progress.downloaded / (1024 * 1024)).toFixed(2);
                         const totalMB = (progress.total / (1024 * 1024)).toFixed(2);
                         model._statusText.textContent = `Downloading: ${downloadedMB} MB / ${totalMB} MB (${progress.progress}%)`;
-                        model._statusText.style.color = '#6c9';
+                        model._statusText.style.color = COLORS.PROGRESS_GREEN;
                         // Add pulsing animation
                         if (progressFill) {
                             progressFill.classList.add('progress-downloading');
                         }
                     } else if (progress.status === 'completed') {
-                        clearInterval(pollInterval);
                         this.downloadingModels.delete(model.name);
 
                         // Remove pulsing animation
@@ -1085,30 +1239,28 @@ class MissingModelsDialog extends ComfyDialog {
                         }
 
                         model._statusText.textContent = 'Download completed!';
-                        model._statusText.style.color = '#6c9';
+                        model._statusText.style.color = COLORS.PROGRESS_GREEN;
                         model._downloadButton.textContent = "Completed";
-                        model._downloadButton.style.backgroundColor = '#28a745';
+                        model._downloadButton.style.backgroundColor = COLORS.PRIMARY_GREEN;
                         model._card.style.opacity = '0.7';
 
                         // Update Download All button state
                         this.updateDownloadAllButtonState();
                     } else if (progress.status === 'error') {
-                        clearInterval(pollInterval);
                         this.downloadingModels.delete(model.name);
 
                         model._statusText.textContent = `Error: ${progress.error || 'Unknown error'}`;
-                        model._statusText.style.color = '#f44';
+                        model._statusText.style.color = COLORS.ERROR_RED;
                         model._downloadButton.textContent = "Retry";
                         model._downloadButton.disabled = false;
 
                         // Update Download All button state
                         this.updateDownloadAllButtonState();
                     } else if (progress.status === 'cancelled') {
-                        clearInterval(pollInterval);
                         this.downloadingModels.delete(model.name);
 
                         model._statusText.textContent = 'Download cancelled';
-                        model._statusText.style.color = '#fa4';
+                        model._statusText.style.color = COLORS.WARNING_ORANGE;
                         model._downloadButton.textContent = "Download";
                         model._downloadButton.disabled = false;
 
@@ -1116,22 +1268,26 @@ class MissingModelsDialog extends ComfyDialog {
                         this.updateDownloadAllButtonState();
                     }
                 }
-            } catch (error) {
-                console.error("[Missing Models] Poll error:", error);
-                clearInterval(pollInterval);
-            }
-        }, 500); // Poll every 500ms
+            },
+            (data) => {
+                // Stop polling when download reaches terminal state
+                return data.status === 'success' && data.progress &&
+                       ['completed', 'error', 'cancelled'].includes(data.progress.status);
+            },
+            500, // Poll every 500ms
+            (error) => console.error("[Missing Models] Poll error:", error)
+        );
     }
 
     async downloadAllModels() {
         const modelsWithUrls = this.missingModels.filter(m => m.url && m.url.trim() !== '');
 
         if (modelsWithUrls.length === 0) {
-            this.updateStatus("No models with URLs to download", "warning");
+            this.updateStatus("No models with URLs to download", STATUS_TYPES.WARNING);
             return;
         }
 
-        this.updateStatus(`Downloading ${modelsWithUrls.length} model(s)...`, "info");
+        this.updateStatus(`Downloading ${modelsWithUrls.length} model(s)...`, STATUS_TYPES.INFO);
 
         // Download sequentially
         for (const model of modelsWithUrls) {
@@ -1149,20 +1305,13 @@ class MissingModelsDialog extends ComfyDialog {
         }
     }
 
-    updateStatus(message, type = "info") {
-        const colors = {
-            info: '#6c9',
-            success: '#6c9',
-            warning: '#fa4',
-            error: '#f44'
-        };
-
+    updateStatus(message, type = STATUS_TYPES.INFO) {
         this.statusElement.innerHTML = '';
         this.statusElement.appendChild(
             $el("span", {
                 textContent: message,
                 style: {
-                    color: colors[type] || '#aaa'
+                    color: STATUS_COLORS[type] || COLORS.LIGHT_GRAY
                 }
             })
         );

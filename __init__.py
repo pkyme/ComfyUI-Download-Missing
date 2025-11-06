@@ -58,19 +58,54 @@ NODE_TYPE_TO_FOLDER = {
 class MissingModelsExtension:
     """Extension to find and download missing models from workflows"""
 
+    # Download configuration constants
+    DOWNLOAD_CHUNK_SIZE = 4 * 1024 * 1024  # 4MB chunks (optimized for large files)
+    DOWNLOAD_PROGRESS_UPDATE_INTERVAL = 20 * 1024 * 1024  # Update progress every 20MB
+
+    # HTTP connection pool settings
+    HTTP_CONNECTION_LIMIT = 10  # Maximum number of connections
+    HTTP_CONNECTION_LIMIT_PER_HOST = 5  # Maximum connections per host
+    DNS_CACHE_TTL = 300  # DNS cache TTL in seconds
+    CONNECT_TIMEOUT = 60  # Connection timeout in seconds
+    SOCKET_READ_TIMEOUT = 120  # Socket read timeout in seconds
+
+    # Scan progress tracking
+    CURRENT_SCAN_ID = 'current'
+
+    # Model file extensions
+    MODEL_FILE_EXTENSIONS = {
+        '.safetensors', '.ckpt', '.pt', '.pth',
+        '.bin', '.sft', '.gguf'
+    }
+
+    # Node type keyword to folder mapping
+    # Order matters for compound checks (e.g., clip_vision before clip)
+    NODE_TYPE_KEYWORDS = [
+        (['clip_vision', 'clipvision'], 'clip_vision'),
+        (['checkpoint'], 'checkpoints'),
+        (['lora'], 'loras'),
+        (['vae'], 'vae'),
+        (['controlnet'], 'controlnet'),
+        (['clip'], 'text_encoders'),
+        (['unet', 'diffusion'], 'diffusion_models'),
+        (['upscale', 'upscaler'], 'upscale_models'),
+        (['embedding'], 'embeddings'),
+        (['hypernetwork'], 'hypernetworks'),
+    ]
+
     def __init__(self):
         self.routes = PromptServer.instance.routes
         # Create shared ClientSession for connection pooling
         connector = aiohttp.TCPConnector(
-            limit=10,  # Maximum number of connections
-            limit_per_host=5,  # Maximum connections per host
-            ttl_dns_cache=300,  # DNS cache TTL in seconds
+            limit=self.HTTP_CONNECTION_LIMIT,
+            limit_per_host=self.HTTP_CONNECTION_LIMIT_PER_HOST,
+            ttl_dns_cache=self.DNS_CACHE_TTL,
             enable_cleanup_closed=True
         )
         timeout = aiohttp.ClientTimeout(
             total=None,  # No total timeout (handled per-download)
-            connect=60,  # Connection timeout
-            sock_read=120  # Socket read timeout (increased for large files)
+            connect=self.CONNECT_TIMEOUT,
+            sock_read=self.SOCKET_READ_TIMEOUT
         )
         self.session = aiohttp.ClientSession(
             connector=connector,
@@ -90,217 +125,456 @@ class MissingModelsExtension:
         self.setup_routes()
         logging.info("[Download Missing Models] Extension initialized with connection pooling")
 
+    @staticmethod
+    def handle_api_errors(handler):
+        """
+        Decorator for route handlers to provide consistent error handling
+
+        Usage:
+            @self.routes.post("/endpoint")
+            @self.handle_api_errors
+            async def my_handler(request):
+                # handler logic
+                return response
+        """
+        async def wrapper(request):
+            try:
+                return await handler(request)
+            except Exception as e:
+                logging.error(f"[Download Missing Models] API error in {handler.__name__}: {e}")
+                return web.json_response({
+                    'status': 'error',
+                    'message': str(e)
+                }, status=500)
+
+        # Preserve original function name and docstring
+        wrapper.__name__ = handler.__name__
+        wrapper.__doc__ = handler.__doc__
+        return wrapper
+
+    @staticmethod
+    def _normalize_path(path: str) -> str:
+        """Normalize path separators to forward slashes"""
+        return path.replace('\\', '/')
+
+    def _extract_filename(self, path: str) -> str:
+        """Extract filename from path with normalized separators"""
+        return os.path.basename(self._normalize_path(path))
+
+    def _create_response(self, status='success', data=None, message=None, http_status=200):
+        """
+        Create a standardized JSON response
+
+        Args:
+            status: Response status ('success' or 'error')
+            data: Optional dict of data to include in response
+            message: Optional message string
+            http_status: HTTP status code (default 200)
+
+        Returns:
+            web.Response with JSON body
+        """
+        response = {'status': status}
+        if message:
+            response['message'] = message
+        if data:
+            response.update(data)
+        return web.json_response(response, status=http_status)
+
     def setup_routes(self):
         """Register API routes"""
+        self.routes.post("/download-missing/scan")(self.handle_api_errors(self.handle_scan_workflow))
+        self.routes.post("/download-missing/download")(self.handle_api_errors(self.handle_download_model))
+        self.routes.get("/download-missing/status")(self.handle_api_errors(self.handle_get_status))
+        self.routes.get("/download-missing/status/{model_name}")(self.handle_api_errors(self.handle_get_model_status))
+        self.routes.get("/download-missing/scan-progress")(self.handle_api_errors(self.handle_get_scan_progress))
+        self.routes.post("/download-missing/cancel")(self.handle_api_errors(self.handle_cancel_download))
+        self.routes.post("/download-missing/search-hf")(self.handle_api_errors(self.handle_search_huggingface))
+        self.routes.get("/download-missing/folders")(self.handle_api_errors(self.handle_get_available_folders))
 
-        @self.routes.post("/download-missing/scan")
-        async def scan_workflow(request):
-            """Scan workflow for missing models"""
-            try:
-                data = await request.json()
-                workflow = data.get('workflow', {})
+    # Route handler methods
+    async def handle_scan_workflow(self, request):
+        """Scan workflow for missing models"""
+        data = await request.json()
+        workflow = data.get('workflow', {})
 
-                result = await self.find_missing_models(workflow)
+        result = await self.find_missing_models(workflow)
 
-                return web.json_response({
-                    'status': 'success',
-                    'missing_models': result['missing_models'],
-                    'not_found_models': result['not_found_models'],
-                    'corrected_models': result['corrected_models'],
-                    'missing_count': len(result['missing_models']),
-                    'not_found_count': len(result['not_found_models']),
-                    'corrected_count': len(result['corrected_models'])
-                })
-            except Exception as e:
-                logging.error(f"[Download Missing Models] Error scanning workflow: {e}")
-                return web.json_response({
-                    'status': 'error',
-                    'message': str(e)
-                }, status=500)
+        return web.json_response({
+            'status': 'success',
+            'missing_models': result['missing_models'],
+            'not_found_models': result['not_found_models'],
+            'corrected_models': result['corrected_models'],
+            'missing_count': len(result['missing_models']),
+            'not_found_count': len(result['not_found_models']),
+            'corrected_count': len(result['corrected_models'])
+        })
 
-        @self.routes.post("/download-missing/download")
-        async def download_model(request):
-            """Start downloading a model"""
-            try:
-                data = await request.json()
-                model_name = data.get('model_name')
-                model_url = data.get('model_url')
-                model_folder = data.get('model_folder')
-                expected_filename = data.get('expected_filename')  # What the workflow needs
-                actual_filename = data.get('actual_filename')  # What HuggingFace has (if different)
-                node_id = data.get('node_id')
-                node_type = data.get('node_type')
-                correction_type = data.get('correction_type')
-                widget_index = data.get('widget_index')
-                property_index = data.get('property_index')
+    async def handle_download_model(self, request):
+        """Start downloading a model"""
+        data = await request.json()
+        model_name = data.get('model_name')
+        model_url = data.get('model_url')
+        model_folder = data.get('model_folder')
+        expected_filename = data.get('expected_filename')  # What the workflow needs
+        actual_filename = data.get('actual_filename')  # What HuggingFace has (if different)
+        node_id = data.get('node_id')
+        node_type = data.get('node_type')
+        correction_type = data.get('correction_type')
+        widget_index = data.get('widget_index')
+        property_index = data.get('property_index')
 
-                if not model_name or not model_url:
-                    return web.json_response({
-                        'status': 'error',
-                        'message': 'Missing model_name or model_url'
-                    }, status=400)
+        if not model_name or not model_url:
+            return web.json_response({
+                'status': 'error',
+                'message': 'Missing model_name or model_url'
+            }, status=400)
 
-                if not model_folder or model_folder == 'MANUAL_SELECTION_REQUIRED':
-                    return web.json_response({
-                        'status': 'error',
-                        'message': 'Folder must be specified for this model. Please select a folder from the dropdown.'
-                    }, status=400)
+        if not model_folder or model_folder == 'MANUAL_SELECTION_REQUIRED':
+            return web.json_response({
+                'status': 'error',
+                'message': 'Folder must be specified for this model. Please select a folder from the dropdown.'
+            }, status=400)
 
-                # If expected_filename not provided, use model_name
-                if not expected_filename:
-                    expected_filename = model_name
+        # If expected_filename not provided, use model_name
+        if not expected_filename:
+            expected_filename = model_name
 
-                # If actual_filename not provided, it's the same as expected
-                if not actual_filename:
-                    actual_filename = expected_filename
+        # If actual_filename not provided, it's the same as expected
+        if not actual_filename:
+            actual_filename = expected_filename
 
-                # Cancel existing download if running
-                if expected_filename in download_tasks:
-                    download_tasks[expected_filename].cancel()
+        # Cancel existing download if running
+        if expected_filename in download_tasks:
+            download_tasks[expected_filename].cancel()
 
-                # Start download task
-                task = asyncio.create_task(
-                    self.download_model_async(expected_filename, model_url, model_folder, actual_filename)
-                )
-                download_tasks[expected_filename] = task
+        # Start download task
+        task = asyncio.create_task(
+            self.download_model_async(expected_filename, model_url, model_folder, actual_filename)
+        )
+        download_tasks[expected_filename] = task
 
-                # Generate correction for node reference
-                correction = None
-                if node_id is not None and correction_type:
-                    correction = {
-                        'name': os.path.basename(model_name.replace('\\', '/')),
-                        'old_path': model_name,
-                        'new_path': expected_filename,
-                        'folder': model_folder,
-                        'directory': model_folder,
-                        'node_id': node_id,
-                        'node_type': node_type,
-                        'correction_type': correction_type
-                    }
-                    if correction_type == 'widget' and widget_index is not None:
-                        correction['widget_index'] = widget_index
-                    elif correction_type == 'property' and property_index is not None:
-                        correction['property_index'] = property_index
+        # Generate correction for node reference
+        correction = None
+        if node_id is not None and correction_type:
+            correction = {
+                'name': self._extract_filename(model_name),
+                'old_path': model_name,
+                'new_path': expected_filename,
+                'folder': model_folder,
+                'directory': model_folder,
+                'node_id': node_id,
+                'node_type': node_type,
+                'correction_type': correction_type
+            }
+            if correction_type == 'widget' and widget_index is not None:
+                correction['widget_index'] = widget_index
+            elif correction_type == 'property' and property_index is not None:
+                correction['property_index'] = property_index
 
-                return web.json_response({
-                    'status': 'success',
-                    'message': f'Download started for {expected_filename}',
-                    'correction': correction
-                })
-            except Exception as e:
-                logging.error(f"[Download Missing Models] Error starting download: {e}")
-                return web.json_response({
-                    'status': 'error',
-                    'message': str(e)
-                }, status=500)
+        return web.json_response({
+            'status': 'success',
+            'message': f'Download started for {expected_filename}',
+            'correction': correction
+        })
 
-        @self.routes.get("/download-missing/status")
-        async def get_status(request):
-            """Get download progress for all models"""
+    async def handle_get_status(self, request):
+        """Get download progress for all models"""
+        return web.json_response({
+            'status': 'success',
+            'downloads': download_progress
+        })
+
+    async def handle_get_model_status(self, request):
+        """Get download progress for a specific model"""
+        model_name = request.match_info.get("model_name")
+
+        if model_name in download_progress:
             return web.json_response({
                 'status': 'success',
-                'downloads': download_progress
+                'progress': download_progress[model_name]
             })
+        else:
+            return web.json_response({
+                'status': 'error',
+                'message': 'Model not found in download queue'
+            }, status=404)
 
-        @self.routes.get("/download-missing/status/{model_name}")
-        async def get_model_status(request):
-            """Get download progress for a specific model"""
-            model_name = request.match_info.get("model_name")
+    async def handle_get_scan_progress(self, request):
+        """Get scanning progress"""
+        return web.json_response({
+            'status': 'success',
+            'progress': scan_progress
+        })
 
+    async def handle_cancel_download(self, request):
+        """Cancel a running download"""
+        data = await request.json()
+        model_name = data.get('model_name')
+
+        if model_name in download_tasks:
+            download_tasks[model_name].cancel()
             if model_name in download_progress:
-                return web.json_response({
-                    'status': 'success',
-                    'progress': download_progress[model_name]
-                })
-            else:
-                return web.json_response({
-                    'status': 'error',
-                    'message': 'Model not found in download queue'
-                }, status=404)
+                download_progress[model_name]['status'] = 'cancelled'
 
-        @self.routes.get("/download-missing/scan-progress")
-        async def get_scan_progress(request):
-            """Get scanning progress"""
             return web.json_response({
                 'status': 'success',
-                'progress': scan_progress
+                'message': f'Download cancelled for {model_name}'
             })
+        else:
+            return web.json_response({
+                'status': 'error',
+                'message': 'No active download found'
+            }, status=404)
 
-        @self.routes.post("/download-missing/cancel")
-        async def cancel_download(request):
-            """Cancel a running download"""
-            try:
-                data = await request.json()
-                model_name = data.get('model_name')
+    async def handle_search_huggingface(self, request):
+        """Search HuggingFace for a model"""
+        data = await request.json()
+        model_name = data.get('model_name')
+        folder_type = data.get('folder_type')
 
-                if model_name in download_tasks:
-                    download_tasks[model_name].cancel()
-                    if model_name in download_progress:
-                        download_progress[model_name]['status'] = 'cancelled'
+        if not model_name:
+            return web.json_response({
+                'status': 'error',
+                'message': 'Missing model_name parameter'
+            }, status=400)
 
-                    return web.json_response({
-                        'status': 'success',
-                        'message': f'Download cancelled for {model_name}'
+        # Search HuggingFace
+        results = await self.search_huggingface_api(model_name, folder_type)
+
+        return web.json_response({
+            'status': 'success',
+            'results': results,
+            'count': len(results)
+        })
+
+    async def handle_get_available_folders(self, request):
+        """Get list of available model folders from ComfyUI"""
+        available_folders = []
+        for folder_name in folder_paths.folder_names_and_paths.keys():
+            available_folders.append(folder_name)
+
+        return web.json_response({
+            'status': 'success',
+            'folders': sorted(available_folders)
+        })
+
+    def _update_scan_progress(self, scan_id: str, progress: int, stage: str, message: str):
+        """Update scan progress tracking"""
+        scan_progress[scan_id].update({
+            'progress': progress,
+            'stage': stage,
+            'message': message
+        })
+
+    def _scan_node_properties(self, node: dict) -> tuple:
+        """
+        Scan node properties for model references
+        Returns: (missing_models, corrected_models)
+        """
+        missing = []
+        corrected = []
+
+        properties = node.get('properties', {})
+        if 'models' in properties and isinstance(properties['models'], list):
+            for property_idx, model_info in enumerate(properties['models']):
+                model_name = model_info.get('name')
+                model_url = model_info.get('url')
+                model_folder = model_info.get('directory') or model_info.get('folder', 'checkpoints')
+
+                if model_name:
+                    if not self.is_model_installed(model_name, model_folder):
+                        actual_path = self.find_actual_model_path(model_name, model_folder)
+                        if actual_path:
+                            # Model exists at different path - update and record correction
+                            model_info['name'] = actual_path
+                            corrected.append({
+                                'name': self._extract_filename(model_name),
+                                'old_path': model_name,
+                                'new_path': actual_path,
+                                'folder': model_folder,
+                                'directory': model_folder,
+                                'node_id': node.get('id'),
+                                'node_type': node.get('type'),
+                                'correction_type': 'property',
+                                'property_index': property_idx
+                            })
+                        elif model_url:
+                            # Model truly missing and has URL
+                            missing.append({
+                                'name': model_name,
+                                'url': model_url,
+                                'folder': model_folder,
+                                'directory': model_folder,
+                                'node_id': node.get('id'),
+                                'node_type': node.get('type'),
+                                'correction_type': 'property',
+                                'property_index': property_idx
+                            })
+
+        return missing, corrected
+
+    def _scan_node_widgets(self, node: dict, workflow: dict) -> tuple:
+        """
+        Scan node widgets for model references
+        Returns: (missing_models, missing_no_url, corrected_models)
+        """
+        missing = []
+        missing_no_url = []
+        corrected = []
+
+        # Only check widgets if no models were found in properties
+        properties = node.get('properties', {})
+        if 'models' in properties and isinstance(properties.get('models'), list):
+            return missing, missing_no_url, corrected
+
+        widgets_values = node.get('widgets_values', [])
+        node_type = node.get('type', '')
+
+        logging.debug(f"[Download Missing Models] Scanning node {node.get('id')} ({node_type}), widgets_values: {widgets_values}")
+
+        for widget_idx, widget_value in enumerate(widgets_values):
+            if not self.detect_model_file(widget_value):
+                continue
+
+            model_name = widget_value
+            result = self.find_model_in_all_folders(model_name)
+
+            if result:
+                actual_path, folder_type = result
+                if self._normalize_path(actual_path) == self._normalize_path(model_name):
+                    # Model already at correct path, skip
+                    logging.info(f"[Download Missing Models] ✓ Model already at correct path, skipping: {actual_path}")
+                    continue
+                else:
+                    # Model exists but at different path - update widget and record correction
+                    widgets_values[widget_idx] = actual_path
+                    corrected.append({
+                        'name': self._extract_filename(model_name),
+                        'old_path': model_name,
+                        'new_path': actual_path,
+                        'folder': folder_type,
+                        'directory': folder_type,
+                        'node_id': node.get('id'),
+                        'node_type': node_type,
+                        'correction_type': 'widget',
+                        'widget_index': widget_idx
+                    })
+                    logging.info(f"[Download Missing Models] Corrected path: {model_name} -> {actual_path} (node {node.get('id')}, widget {widget_idx})")
+            else:
+                # Model not found anywhere - try to find URL
+                logging.debug(f"[Download Missing Models] Model not found: {model_name}")
+                model_url = self.find_model_url(workflow, model_name, node)
+
+                # Determine folder type from node type
+                folder_type = self.get_folder_from_node_type(node_type)
+                if folder_type is None:
+                    folder_type = 'MANUAL_SELECTION_REQUIRED'
+
+                if model_url:
+                    # Has URL - can download
+                    missing.append({
+                        'name': model_name,
+                        'url': model_url,
+                        'folder': folder_type,
+                        'directory': folder_type,
+                        'needs_folder_selection': folder_type == 'MANUAL_SELECTION_REQUIRED',
+                        'node_id': node.get('id'),
+                        'node_type': node_type,
+                        'correction_type': 'widget',
+                        'widget_index': widget_idx
                     })
                 else:
-                    return web.json_response({
-                        'status': 'error',
-                        'message': 'No active download found'
-                    }, status=404)
-            except Exception as e:
-                logging.error(f"[Download Missing Models] Error cancelling download: {e}")
-                return web.json_response({
-                    'status': 'error',
-                    'message': str(e)
-                }, status=500)
+                    # No URL - needs HF search
+                    missing_no_url.append({
+                        'name': model_name,
+                        'folder': folder_type,
+                        'directory': folder_type,
+                        'needs_folder_selection': folder_type == 'MANUAL_SELECTION_REQUIRED',
+                        'node_id': node.get('id'),
+                        'node_type': node_type,
+                        'correction_type': 'widget',
+                        'widget_index': widget_idx
+                    })
 
-        @self.routes.post("/download-missing/search-hf")
-        async def search_huggingface(request):
-            """Search HuggingFace for a model"""
-            try:
-                data = await request.json()
-                model_name = data.get('model_name')
-                folder_type = data.get('folder_type')
+        return missing, missing_no_url, corrected
 
-                if not model_name:
-                    return web.json_response({
-                        'status': 'error',
-                        'message': 'Missing model_name parameter'
-                    }, status=400)
+    def _scan_workflow_metadata(self, workflow: dict) -> tuple:
+        """
+        Scan workflow-level metadata for model references
+        Returns: (missing_models, corrected_models)
+        """
+        missing = []
+        corrected = []
 
-                # Search HuggingFace
-                results = await self.search_huggingface_api(model_name, folder_type)
+        extra = workflow.get('extra', {})
+        if 'model_urls' in extra:
+            for model_name, model_data in extra['model_urls'].items():
+                model_folder = model_data.get('directory') or model_data.get('folder', 'checkpoints')
+                if not self.is_model_installed(model_name, model_folder):
+                    actual_path = self.find_actual_model_path(model_name, model_folder)
+                    if actual_path:
+                        # Model exists at different path - record correction
+                        corrected.append({
+                            'name': os.path.basename(model_name.replace('\\', '/')),
+                            'old_path': model_name,
+                            'new_path': actual_path,
+                            'folder': model_folder,
+                            'directory': model_folder,
+                            'node_id': None,
+                            'node_type': 'metadata'
+                        })
+                    else:
+                        # Model truly missing
+                        missing.append({
+                            'name': model_name,
+                            'url': model_data.get('url'),
+                            'folder': model_folder,
+                            'directory': model_folder,
+                            'node_id': None,
+                            'node_type': 'metadata'
+                        })
 
-                return web.json_response({
-                    'status': 'success',
-                    'results': results,
-                    'count': len(results)
-                })
-            except Exception as e:
-                logging.error(f"[Download Missing Models] Error searching HuggingFace: {e}")
-                return web.json_response({
-                    'status': 'error',
-                    'message': str(e)
-                }, status=500)
+        return missing, corrected
 
-        @self.routes.get("/download-missing/folders")
-        async def get_available_folders(request):
-            """Get list of available model folders from ComfyUI"""
-            try:
-                available_folders = []
-                for folder_name in folder_paths.folder_names_and_paths.keys():
-                    available_folders.append(folder_name)
+    def _deduplicate_models(self, missing_models: list, corrected_models: list, missing_no_url: list) -> tuple:
+        """
+        Remove duplicates from model lists
+        Returns: (unique_missing, unique_corrected, unique_no_url)
+        """
+        # For missing models, deduplicate by (name, folder)
+        seen_missing = set()
+        unique_missing = []
+        for model in missing_models:
+            key = (model['name'], model['folder'])
+            if key not in seen_missing:
+                seen_missing.add(key)
+                unique_missing.append(model)
 
-                return web.json_response({
-                    'status': 'success',
-                    'folders': sorted(available_folders)
-                })
-            except Exception as e:
-                logging.error(f"[Download Missing Models] Error getting folders: {e}")
-                return web.json_response({
-                    'status': 'error',
-                    'message': str(e)
-                }, status=500)
+        # For corrections, deduplicate by node location
+        seen_corrected = set()
+        unique_corrected = []
+        for model in corrected_models:
+            key = (
+                model['node_id'],
+                model.get('correction_type'),
+                model.get('widget_index'),
+                model.get('property_index')
+            )
+            if key not in seen_corrected:
+                seen_corrected.add(key)
+                unique_corrected.append(model)
+
+        # For missing_no_url, deduplicate by node location
+        seen_no_url = set()
+        unique_no_url = []
+        for model in missing_no_url:
+            key = (model['node_id'], model['name'])
+            if key not in seen_no_url:
+                seen_no_url.add(key)
+                unique_no_url.append(model)
+
+        return unique_missing, unique_corrected, unique_no_url
 
     async def find_missing_models(self, workflow: dict) -> dict:
         """
@@ -312,7 +586,7 @@ class MissingModelsExtension:
             - corrected_models: list of models that were found at different paths
         """
         # Initialize progress tracking
-        scan_id = 'current'
+        scan_id = self.CURRENT_SCAN_ID
         scan_progress[scan_id] = {
             'status': 'scanning',
             'stage': 'nodes',
@@ -326,211 +600,40 @@ class MissingModelsExtension:
         nodes = workflow.get('nodes', [])
         total_nodes = len(nodes)
 
+        # Scan each node
         for node_idx, node in enumerate(nodes):
-            # Check node properties for embedded model info
-            properties = node.get('properties', {})
+            # Scan node properties
+            prop_missing, prop_corrected = self._scan_node_properties(node)
+            missing_models.extend(prop_missing)
+            corrected_models.extend(prop_corrected)
 
-            if 'models' in properties and isinstance(properties['models'], list):
-                for property_idx, model_info in enumerate(properties['models']):
-                    model_name = model_info.get('name')
-                    model_url = model_info.get('url')
-                    # Try 'directory' first, then 'folder' as fallback
-                    model_folder = model_info.get('directory') or model_info.get('folder', 'checkpoints')
-
-                    if model_name:
-                        if not self.is_model_installed(model_name, model_folder):
-                            # Try to find model at different path
-                            actual_path = self.find_actual_model_path(model_name, model_folder)
-                            if actual_path:
-                                # Model exists at different path - update and record correction
-                                model_info['name'] = actual_path
-                                corrected_models.append({
-                                    'name': os.path.basename(model_name.replace('\\', '/')),
-                                    'old_path': model_name,
-                                    'new_path': actual_path,
-                                    'folder': model_folder,
-                                    'directory': model_folder,
-                                    'node_id': node.get('id'),
-                                    'node_type': node.get('type'),
-                                    'correction_type': 'property',
-                                    'property_index': property_idx
-                                })
-                            elif model_url:
-                                # Model truly missing and has URL
-                                missing_models.append({
-                                    'name': model_name,
-                                    'url': model_url,
-                                    'folder': model_folder,
-                                    'directory': model_folder,  # Add directory field for UI
-                                    'node_id': node.get('id'),
-                                    'node_type': node.get('type'),
-                                    'correction_type': 'property',
-                                    'property_index': property_idx
-                                })
-
-            # Only check widgets_values if no models were found in properties
-            # This prevents duplicates when a node has both properties.models and widgets_values
-            if 'models' not in properties or not isinstance(properties.get('models'), list):
-                widgets_values = node.get('widgets_values', [])
-                node_type = node.get('type', '')
-
-                logging.debug(f"[Download Missing Models] Scanning node {node.get('id')} ({node_type}), widgets_values: {widgets_values}")
-
-                # Generic scanning: check all widget values for model files
-                for widget_idx, widget_value in enumerate(widgets_values):
-                    if not self.detect_model_file(widget_value):
-                        continue
-
-                    model_name = widget_value
-
-                    # Try to find the model in all folders
-                    result = self.find_model_in_all_folders(model_name)
-
-                    if result:
-                        actual_path, folder_type = result
-                        # Check if it's at the exact path specified
-                        if actual_path.replace('\\', '/') == model_name.replace('\\', '/'):
-                            # Model is already at correct path, skip
-                            logging.info(f"[Download Missing Models] ✓ Model already at correct path, skipping: {actual_path}")
-                            continue
-                        else:
-                            # Model exists but at different path - update widget and record correction
-                            widgets_values[widget_idx] = actual_path
-                            corrected_models.append({
-                                'name': os.path.basename(model_name.replace('\\', '/')),
-                                'old_path': model_name,
-                                'new_path': actual_path,
-                                'folder': folder_type,
-                                'directory': folder_type,
-                                'node_id': node.get('id'),
-                                'node_type': node_type,
-                                'correction_type': 'widget',
-                                'widget_index': widget_idx
-                            })
-                            logging.info(f"[Download Missing Models] Corrected path: {model_name} -> {actual_path} (node {node.get('id')}, widget {widget_idx})")
-                    else:
-                        # Model not found anywhere - try to find URL
-                        logging.debug(f"[Download Missing Models] Model not found: {model_name}")
-                        model_url = self.find_model_url(workflow, model_name, node)
-
-                        # Determine folder type from node type
-                        folder_type = self.get_folder_from_node_type(node_type)
-                        if folder_type is None:
-                            folder_type = 'MANUAL_SELECTION_REQUIRED'
-
-                        if model_url:
-                            # Has URL - can download
-                            missing_models.append({
-                                'name': model_name,
-                                'url': model_url,
-                                'folder': folder_type,
-                                'directory': folder_type,
-                                'needs_folder_selection': folder_type == 'MANUAL_SELECTION_REQUIRED',
-                                'node_id': node.get('id'),
-                                'node_type': node_type,
-                                'correction_type': 'widget',
-                                'widget_index': widget_idx
-                            })
-                        else:
-                            # No URL - needs HF search
-                            missing_no_url.append({
-                                'name': model_name,
-                                'folder': folder_type,
-                                'directory': folder_type,
-                                'needs_folder_selection': folder_type == 'MANUAL_SELECTION_REQUIRED',
-                                'node_id': node.get('id'),
-                                'node_type': node_type,
-                                'correction_type': 'widget',
-                                'widget_index': widget_idx
-                            })
+            # Scan node widgets
+            widget_missing, widget_no_url, widget_corrected = self._scan_node_widgets(node, workflow)
+            missing_models.extend(widget_missing)
+            missing_no_url.extend(widget_no_url)
+            corrected_models.extend(widget_corrected)
 
             # Update progress for each node
             if total_nodes > 0:
                 node_progress = int((node_idx + 1) / total_nodes * 33)
-                scan_progress[scan_id].update({
-                    'progress': node_progress,
-                    'message': f'Scanning workflow nodes ({node_idx + 1}/{total_nodes})...'
-                })
+                self._update_scan_progress(scan_id, node_progress, 'nodes',
+                                          f'Scanning workflow nodes ({node_idx + 1}/{total_nodes})...')
 
         # Update progress: nodes scanned
-        scan_progress[scan_id].update({
-            'progress': 33,
-            'stage': 'metadata',
-            'message': 'Checking workflow metadata...'
-        })
+        self._update_scan_progress(scan_id, 33, 'metadata', 'Checking workflow metadata...')
 
         # Check workflow-level metadata
-        extra = workflow.get('extra', {})
-        if 'model_urls' in extra:
-            for model_name, model_data in extra['model_urls'].items():
-                # Try 'directory' first, then 'folder' as fallback
-                model_folder = model_data.get('directory') or model_data.get('folder', 'checkpoints')
-                if not self.is_model_installed(model_name, model_folder):
-                    # Try to find model at different path
-                    actual_path = self.find_actual_model_path(model_name, model_folder)
-                    if actual_path:
-                        # Model exists at different path - record correction
-                        # Note: Can't update workflow metadata directly as it's not linked to nodes
-                        corrected_models.append({
-                            'name': os.path.basename(model_name.replace('\\', '/')),
-                            'old_path': model_name,
-                            'new_path': actual_path,
-                            'folder': model_folder,
-                            'directory': model_folder,
-                            'node_id': None,
-                            'node_type': 'metadata'
-                        })
-                    else:
-                        # Model truly missing
-                        missing_models.append({
-                            'name': model_name,
-                            'url': model_data.get('url'),
-                            'folder': model_folder,
-                            'directory': model_folder,  # Add directory field for UI
-                            'node_id': None,
-                            'node_type': 'metadata'
-                        })
+        meta_missing, meta_corrected = self._scan_workflow_metadata(workflow)
+        missing_models.extend(meta_missing)
+        corrected_models.extend(meta_corrected)
 
-        # Remove duplicates from both lists
-        seen_missing = set()
-        unique_missing = []
-        for model in missing_models:
-            key = (model['name'], model['folder'])
-            if key not in seen_missing:
-                seen_missing.add(key)
-                unique_missing.append(model)
-
-        # For corrections, deduplicate by node location, not by model file
-        # This ensures all nodes get corrected even if they reference the same model
-        seen_corrected = set()
-        unique_corrected = []
-        for model in corrected_models:
-            # Use node_id + correction location as key
-            key = (
-                model['node_id'],
-                model.get('correction_type'),
-                model.get('widget_index'),
-                model.get('property_index')
-            )
-            if key not in seen_corrected:
-                seen_corrected.add(key)
-                unique_corrected.append(model)
-
-        # For missing_no_url, also deduplicate by node location
-        seen_no_url = set()
-        unique_no_url = []
-        for model in missing_no_url:
-            key = (model['node_id'], model['name'])
-            if key not in seen_no_url:
-                seen_no_url.add(key)
-                unique_no_url.append(model)
+        # Remove duplicates
+        unique_missing, unique_corrected, unique_no_url = self._deduplicate_models(
+            missing_models, corrected_models, missing_no_url
+        )
 
         # Update progress: resolving URLs
-        scan_progress[scan_id].update({
-            'progress': 66,
-            'stage': 'resolving',
-            'message': 'Resolving model URLs...'
-        })
+        self._update_scan_progress(scan_id, 66, 'resolving', 'Resolving model URLs...')
 
         # Attempt to resolve URLs for models without them using unified resolution strategy
         # This includes: workflow notes, HuggingFace search, etc.
@@ -540,12 +643,8 @@ class MissingModelsExtension:
         all_ready_to_download = unique_missing + resolved_models
 
         # Update progress: complete
-        scan_progress[scan_id].update({
-            'progress': 100,
-            'stage': 'complete',
-            'status': 'complete',
-            'message': 'Scan complete'
-        })
+        scan_progress[scan_id]['status'] = 'complete'
+        self._update_scan_progress(scan_id, 100, 'complete', 'Scan complete')
 
         return {
             'missing_models': all_ready_to_download,
@@ -685,18 +784,8 @@ class MissingModelsExtension:
             return False
 
         # Check for common model file extensions
-        model_extensions = [
-            '.safetensors',
-            '.ckpt',
-            '.pt',
-            '.pth',
-            '.bin',
-            '.sft',
-            '.gguf'
-        ]
-
         value_lower = value.lower()
-        return any(value_lower.endswith(ext) for ext in model_extensions)
+        return any(value_lower.endswith(ext) for ext in self.MODEL_FILE_EXTENSIONS)
 
     def find_model_in_all_folders(self, model_name: str) -> Optional[Tuple[str, str]]:
         """
@@ -803,26 +892,9 @@ class MissingModelsExtension:
         # 2. Check node type name for keywords (heuristic)
         node_lower = node_type.lower()
 
-        if 'checkpoint' in node_lower:
-            return 'checkpoints'
-        elif 'lora' in node_lower:
-            return 'loras'
-        elif 'vae' in node_lower:
-            return 'vae'
-        elif 'controlnet' in node_lower:
-            return 'controlnet'
-        elif 'clip' in node_lower and 'vision' not in node_lower:
-            return 'text_encoders'
-        elif 'clip_vision' in node_lower or 'clipvision' in node_lower:
-            return 'clip_vision'
-        elif 'unet' in node_lower or 'diffusion' in node_lower:
-            return 'diffusion_models'
-        elif 'upscale' in node_lower or 'upscaler' in node_lower:
-            return 'upscale_models'
-        elif 'embedding' in node_lower:
-            return 'embeddings'
-        elif 'hypernetwork' in node_lower:
-            return 'hypernetworks'
+        for keywords, folder in self.NODE_TYPE_KEYWORDS:
+            if any(keyword in node_lower for keyword in keywords):
+                return folder
 
         # Unknown node type - needs manual selection
         return None
@@ -895,18 +967,16 @@ class MissingModelsExtension:
 
                 downloaded = 0
                 last_update_bytes = 0
-                chunk_size = 4194304  # 4MB chunks (optimized for large files)
-                update_interval_bytes = 20 * 1024 * 1024  # Update every 20MB
 
                 # Use async file I/O to avoid blocking the event loop
                 async with aiofiles.open(temp_path, 'wb') as f:
-                    async for chunk in response.content.iter_chunked(chunk_size):
+                    async for chunk in response.content.iter_chunked(self.DOWNLOAD_CHUNK_SIZE):
                         if chunk:
                             await f.write(chunk)
                             downloaded += len(chunk)
 
-                            # Byte-based throttled progress updates (every 20MB or on last chunk)
-                            if downloaded - last_update_bytes >= update_interval_bytes or downloaded >= total_size:
+                            # Byte-based throttled progress updates
+                            if downloaded - last_update_bytes >= self.DOWNLOAD_PROGRESS_UPDATE_INTERVAL or downloaded >= total_size:
                                 download_progress[model_name]['downloaded'] = downloaded
                                 if total_size > 0:
                                     progress = (downloaded / total_size) * 100
@@ -1331,6 +1401,111 @@ class MissingModelsExtension:
             logging.warning(f"[Download Missing Models] Error listing repos for {username}: {e}")
             return []
 
+    async def _fetch_repo_files_with_cache(self, api, repo_id: str, repo_last_modified: Optional[str]) -> List[str]:
+        """
+        Fetch repository file list with cache support
+
+        Args:
+            api: HuggingFace API instance
+            repo_id: Repository ID
+            repo_last_modified: Last modification timestamp
+
+        Returns:
+            List of file paths in the repository
+        """
+        # If repo_last_modified is None (specific repo), fetch it for cache validation
+        if repo_last_modified is None:
+            try:
+                loop = asyncio.get_event_loop()
+                repo_info = await loop.run_in_executor(None, api.repo_info, repo_id, repo_type="model")
+                if hasattr(repo_info, 'lastModified') and repo_info.lastModified:
+                    repo_last_modified = repo_info.lastModified.isoformat()
+            except Exception as e:
+                logging.warning(f"[Download Missing Models] Could not fetch lastModified for {repo_id}: {e}")
+
+        # Check if we need to update cache
+        cache_data = self.get_repo_from_cache(repo_id)
+        file_list = None
+
+        # Use cache if valid (exists and repo not modified since cache)
+        if cache_data and repo_last_modified:
+            cached_last_modified = cache_data.get('last_modified')
+            if cached_last_modified == repo_last_modified:
+                # Cache is up to date
+                file_list = cache_data.get('files', [])
+
+        # Fetch from API if cache invalid or missing
+        if file_list is None:
+            loop = asyncio.get_event_loop()
+            file_list = await loop.run_in_executor(None, api.list_repo_files, repo_id)
+
+            # Save to disk cache
+            if repo_last_modified:
+                self.update_repo_in_cache(repo_id, file_list, repo_last_modified)
+            else:
+                logging.warning(f"[Download Missing Models]   ⚠ No last_modified available, not caching")
+
+        # Also cache in memory for this session
+        self.repo_files_cache[repo_id] = file_list
+
+        return file_list
+
+    def _create_match_result(self, repo_id: str, file_path: str, search_filename: str, score: float) -> dict:
+        """
+        Create a match result dictionary
+
+        Args:
+            repo_id: Repository ID
+            file_path: Full file path in repo
+            search_filename: Original search filename
+            score: Match score (1.0 for exact, 0.9 for flexible)
+
+        Returns:
+            Match result dictionary
+        """
+        file_basename = self._extract_filename(file_path)
+        return {
+            'repo_id': repo_id,
+            'filename': file_path,
+            'actual_filename': file_basename,
+            'expected_filename': search_filename,
+            'file_size': 0,
+            'downloads': 0,
+            'likes': 0,
+            'score': score,
+            'download_url': f"https://huggingface.co/{repo_id}/resolve/main/{file_path}",
+            'source': 'popular_repos'
+        }
+
+    def _match_files_in_repo(self, file_list: List[str], search_filename: str, repo_id: str) -> List[dict]:
+        """
+        Search for matching files in a repository file list
+
+        Args:
+            file_list: List of file paths
+            search_filename: Filename to search for
+            repo_id: Repository ID
+
+        Returns:
+            List of matching results
+        """
+        results = []
+
+        # Pass 1: Try exact match first
+        for file_path in file_list:
+            file_basename = os.path.basename(file_path)
+            if file_basename.lower() == search_filename.lower():
+                results.append(self._create_match_result(repo_id, file_path, search_filename, 1.0))
+
+        # Pass 2: If no exact match, try flexible matching
+        if len(results) == 0:
+            for file_path in file_list:
+                file_basename = os.path.basename(file_path)
+                if self.flexible_filename_match(file_basename, search_filename):
+                    results.append(self._create_match_result(repo_id, file_path, search_filename, 0.9))
+
+        return results
+
     async def search_popular_repos(self, filename: str) -> List[dict]:
         """
         Search through HuggingFace repositories from popular users for a specific model file.
@@ -1349,7 +1524,7 @@ class MissingModelsExtension:
                 return []
 
             # Clean filename for search
-            search_filename = os.path.basename(filename.replace('\\', '/'))
+            search_filename = self._extract_filename(filename)
             logging.info(f"[Download Missing Models] Searching for: {search_filename}")
 
             results = []
@@ -1371,85 +1546,12 @@ class MissingModelsExtension:
 
                     for repo_id, repo_last_modified in repo_data:
                         try:
-                            # If repo_last_modified is None (specific repo), fetch it for cache validation
-                            if repo_last_modified is None:
-                                try:
-                                    loop = asyncio.get_event_loop()
-                                    repo_info = await loop.run_in_executor(None, api.repo_info, repo_id, repo_type="model")
-                                    if hasattr(repo_info, 'lastModified') and repo_info.lastModified:
-                                        repo_last_modified = repo_info.lastModified.isoformat()
-                                except Exception as e:
-                                    logging.warning(f"[Download Missing Models] Could not fetch lastModified for {repo_id}: {e}")
+                            # Fetch file list with cache support
+                            file_list = await self._fetch_repo_files_with_cache(api, repo_id, repo_last_modified)
 
-                            # Check if we need to update cache
-                            cache_data = self.get_repo_from_cache(repo_id)
-
-                            file_list = None
-
-                            # Use cache if valid (exists and repo not modified since cache)
-                            if cache_data and repo_last_modified:
-                                cached_last_modified = cache_data.get('last_modified')
-                                if cached_last_modified == repo_last_modified:
-                                    # Cache is up to date
-                                    file_list = cache_data.get('files', [])
-
-                            # Fetch from API if cache invalid or missing
-                            if file_list is None:
-                                loop = asyncio.get_event_loop()
-                                file_list = await loop.run_in_executor(None, api.list_repo_files, repo_id)
-
-                                # Save to disk cache
-                                if repo_last_modified:
-                                    self.update_repo_in_cache(repo_id, file_list, repo_last_modified)
-                                else:
-                                    logging.warning(f"[Download Missing Models]   ⚠ No last_modified available, not caching")
-
-                            # Also cache in memory for this session
-                            self.repo_files_cache[repo_id] = file_list
-
-                            # Search through file list
-                            matches_found = 0
-
-                            # Pass 1: Try exact match first
-                            for file_path in file_list:
-                                file_basename = os.path.basename(file_path)
-
-                                # Check for exact filename match
-                                if file_basename.lower() == search_filename.lower():
-                                    results.append({
-                                        'repo_id': repo_id,
-                                        'filename': file_path,
-                                        'actual_filename': file_basename,
-                                        'expected_filename': search_filename,
-                                        'file_size': 0,
-                                        'downloads': 0,
-                                        'likes': 0,
-                                        'score': 1.0,  # Exact match
-                                        'download_url': f"https://huggingface.co/{repo_id}/resolve/main/{file_path}",
-                                        'source': 'popular_repos'
-                                    })
-                                    matches_found += 1
-
-                            # Pass 2: If no exact match, try flexible matching
-                            if matches_found == 0:
-                                for file_path in file_list:
-                                    file_basename = os.path.basename(file_path)
-
-                                    # Check for flexible match
-                                    if self.flexible_filename_match(file_basename, search_filename):
-                                        results.append({
-                                            'repo_id': repo_id,
-                                            'filename': file_path,
-                                            'actual_filename': file_basename,
-                                            'expected_filename': search_filename,
-                                            'file_size': 0,
-                                            'downloads': 0,
-                                            'likes': 0,
-                                            'score': 0.9,  # Slightly lower score for flexible match
-                                            'download_url': f"https://huggingface.co/{repo_id}/resolve/main/{file_path}",
-                                            'source': 'popular_repos'
-                                        })
-                                        matches_found += 1
+                            # Search for matches in file list
+                            matches = self._match_files_in_repo(file_list, search_filename, repo_id)
+                            results.extend(matches)
 
                         except Exception as e:
                             logging.warning(f"[Download Missing Models] Error checking repo {repo_id}: {e}")
