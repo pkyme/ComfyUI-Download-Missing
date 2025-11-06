@@ -4,25 +4,23 @@ ComfyUI Extension: Download Missing Models
 This extension scans workflows for missing models and provides a UI to download them.
 """
 
+# Standard library imports
+import asyncio
+import json
+import logging
 import os
 import re
-import json
-import asyncio
-import aiohttp
-import aiofiles
-import logging
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+# Third-party imports
+import aiofiles
+import aiohttp
 from aiohttp import web
+from huggingface_hub import HfApi
+
+# ComfyUI imports
 import folder_paths
 from server import PromptServer
-
-try:
-    from huggingface_hub import HfApi
-    HF_API_AVAILABLE = True
-except ImportError:
-    HF_API_AVAILABLE = False
-    logging.warning("[Download Missing Models] huggingface_hub not installed. Install with: pip install huggingface_hub")
 
 # Global state for download progress
 download_progress = {}
@@ -1380,9 +1378,6 @@ class MissingModelsExtension:
             List of tuples: [(repo_id, last_modified_iso_string), ...]
         """
         try:
-            if not HF_API_AVAILABLE:
-                return []
-
             api = HfApi()
             loop = asyncio.get_event_loop()
             models = await loop.run_in_executor(None, lambda: api.list_models(author=username, expand=["lastModified"]))
@@ -1518,11 +1513,6 @@ class MissingModelsExtension:
             List of matching files with repo info and download URLs
         """
         try:
-            # Check if HfApi is available
-            if not HF_API_AVAILABLE:
-                logging.warning(f"[Download Missing Models] huggingface_hub not available - skipping search")
-                return []
-
             # Clean filename for search
             search_filename = self._extract_filename(filename)
             logging.info(f"[Download Missing Models] Searching for: {search_filename}")
