@@ -619,6 +619,17 @@ class MissingModelsDialog extends ComfyDialog {
     }
 
     updateDownloadAllButtonState() {
+        // Debounce to prevent state thrashing during rapid updates
+        if (this._updateButtonTimeout) {
+            clearTimeout(this._updateButtonTimeout);
+        }
+
+        this._updateButtonTimeout = setTimeout(() => {
+            this._updateDownloadAllButtonStateImmediate();
+        }, 100);
+    }
+
+    _updateDownloadAllButtonStateImmediate() {
         // Check if there are any models ready to download (have URLs and not already completed)
         const modelsReadyToDownload = this.missingModels.filter(m => {
             const hasUrl = m.url && m.url.trim() !== '';
@@ -1147,16 +1158,18 @@ class MissingModelsDialog extends ComfyDialog {
     }
 
     async downloadModel(model, progressBar, statusText, downloadButton) {
+        // Prevent double-triggering - check and lock state immediately
         if (this.downloadingModels.has(model.name)) {
             return; // Already downloading
         }
 
         try {
+            // Lock state immediately before any async operations
             this.downloadingModels.add(model.name);
+            downloadButton.disabled = true;
 
             // Update UI
             downloadButton.textContent = "Downloading...";
-            downloadButton.disabled = true;
             progressBar.style.display = 'block';
             statusText.style.display = 'block';
             statusText.textContent = 'Starting download...';
@@ -1215,58 +1228,61 @@ class MissingModelsDialog extends ComfyDialog {
                 if (data.status === 'success' && data.progress) {
                     const progress = data.progress;
 
-                    // Update progress bar
-                    if (progressFill) {
-                        progressFill.style.width = `${progress.progress}%`;
-                    }
-
-                    // Update status text
-                    if (progress.status === 'downloading') {
-                        const downloadedMB = (progress.downloaded / (1024 * 1024)).toFixed(2);
-                        const totalMB = (progress.total / (1024 * 1024)).toFixed(2);
-                        model._statusText.textContent = `Downloading: ${downloadedMB} MB / ${totalMB} MB (${progress.progress}%)`;
-                        model._statusText.style.color = COLORS.PROGRESS_GREEN;
-                        // Add pulsing animation
+                    // Use requestAnimationFrame to sync DOM updates with browser paint cycle
+                    requestAnimationFrame(() => {
+                        // Update progress bar
                         if (progressFill) {
-                            progressFill.classList.add('progress-downloading');
-                        }
-                    } else if (progress.status === 'completed') {
-                        this.downloadingModels.delete(model.name);
-
-                        // Remove pulsing animation
-                        if (progressFill) {
-                            progressFill.classList.remove('progress-downloading');
+                            progressFill.style.width = `${progress.progress}%`;
                         }
 
-                        model._statusText.textContent = 'Download completed!';
-                        model._statusText.style.color = COLORS.PROGRESS_GREEN;
-                        model._downloadButton.textContent = "Completed";
-                        model._downloadButton.style.backgroundColor = COLORS.PRIMARY_GREEN;
-                        model._card.style.opacity = '0.7';
+                        // Update status text
+                        if (progress.status === 'downloading') {
+                            const downloadedMB = (progress.downloaded / (1024 * 1024)).toFixed(2);
+                            const totalMB = (progress.total / (1024 * 1024)).toFixed(2);
+                            model._statusText.textContent = `Downloading: ${downloadedMB} MB / ${totalMB} MB (${progress.progress}%)`;
+                            model._statusText.style.color = COLORS.PROGRESS_GREEN;
+                            // Add pulsing animation
+                            if (progressFill) {
+                                progressFill.classList.add('progress-downloading');
+                            }
+                        } else if (progress.status === 'completed') {
+                            this.downloadingModels.delete(model.name);
 
-                        // Update Download All button state
-                        this.updateDownloadAllButtonState();
-                    } else if (progress.status === 'error') {
-                        this.downloadingModels.delete(model.name);
+                            // Remove pulsing animation
+                            if (progressFill) {
+                                progressFill.classList.remove('progress-downloading');
+                            }
 
-                        model._statusText.textContent = `Error: ${progress.error || 'Unknown error'}`;
-                        model._statusText.style.color = COLORS.ERROR_RED;
-                        model._downloadButton.textContent = "Retry";
-                        model._downloadButton.disabled = false;
+                            model._statusText.textContent = 'Download completed!';
+                            model._statusText.style.color = COLORS.PROGRESS_GREEN;
+                            model._downloadButton.textContent = "Completed";
+                            model._downloadButton.style.backgroundColor = COLORS.PRIMARY_GREEN;
+                            model._card.style.opacity = '0.7';
 
-                        // Update Download All button state
-                        this.updateDownloadAllButtonState();
-                    } else if (progress.status === 'cancelled') {
-                        this.downloadingModels.delete(model.name);
+                            // Update Download All button state
+                            this.updateDownloadAllButtonState();
+                        } else if (progress.status === 'error') {
+                            this.downloadingModels.delete(model.name);
 
-                        model._statusText.textContent = 'Download cancelled';
-                        model._statusText.style.color = COLORS.WARNING_ORANGE;
-                        model._downloadButton.textContent = "Download";
-                        model._downloadButton.disabled = false;
+                            model._statusText.textContent = `Error: ${progress.error || 'Unknown error'}`;
+                            model._statusText.style.color = COLORS.ERROR_RED;
+                            model._downloadButton.textContent = "Retry";
+                            model._downloadButton.disabled = false;
 
-                        // Update Download All button state
-                        this.updateDownloadAllButtonState();
-                    }
+                            // Update Download All button state
+                            this.updateDownloadAllButtonState();
+                        } else if (progress.status === 'cancelled') {
+                            this.downloadingModels.delete(model.name);
+
+                            model._statusText.textContent = 'Download cancelled';
+                            model._statusText.style.color = COLORS.WARNING_ORANGE;
+                            model._downloadButton.textContent = "Download";
+                            model._downloadButton.disabled = false;
+
+                            // Update Download All button state
+                            this.updateDownloadAllButtonState();
+                        }
+                    });
                 }
             },
             (data) => {
@@ -1287,22 +1303,22 @@ class MissingModelsDialog extends ComfyDialog {
             return;
         }
 
-        this.updateStatus(`Downloading ${modelsWithUrls.length} model(s)...`, STATUS_TYPES.INFO);
+        this.updateStatus(`Starting ${modelsWithUrls.length} download(s)...`, STATUS_TYPES.INFO);
 
-        // Download sequentially
-        for (const model of modelsWithUrls) {
-            if (model._downloadButton && !model._downloadButton.disabled) {
-                await this.downloadModel(
+        // Start all downloads in parallel (filter before starting to avoid race conditions)
+        const downloadPromises = modelsWithUrls
+            .filter(m => m._downloadButton && !m._downloadButton.disabled)
+            .map(model =>
+                this.downloadModel(
                     model,
                     model._progressBar,
                     model._statusText,
                     model._downloadButton
-                );
+                )
+            );
 
-                // Wait a bit between downloads to avoid overwhelming the connection
-                await new Promise(resolve => setTimeout(resolve, 1000));
-            }
-        }
+        // Wait for all API calls to initiate (not for downloads to complete)
+        await Promise.allSettled(downloadPromises);
     }
 
     updateStatus(message, type = STATUS_TYPES.INFO) {
@@ -1318,6 +1334,14 @@ class MissingModelsDialog extends ComfyDialog {
     }
 
     async show() {
+        // Reset state from previous run
+        this.missingModels = [];
+        this.notFoundModels = [];
+        this.correctedModels = [];
+        this.downloadingModels.clear();
+        this.modelsListElement.innerHTML = '';
+        this.updateStatus("Initializing...", STATUS_TYPES.INFO);
+
         // Show dialog immediately to display progress
         this.element.style.display = "block";
         setTimeout(() => {

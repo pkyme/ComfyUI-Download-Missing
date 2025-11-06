@@ -197,9 +197,10 @@
     ]
   },
   "Kijai/WanVideo_comfy_fp8_scaled": {
-    "last_modified": "2025-11-04T21:18:28+00:00",
+    "last_modified": "2025-11-06T18:27:07+00:00",
     "files": [
       ".gitattributes",
+      "Bindweave/Wan2_1-I2V-14B-Bindweave_fp8_scaled_KJ.safetensors",
       "ChronoEdit/Wan2_1-14B-I2V_ChronoEdit_fp8_scaled_KJ.safetensors",
       "Fun/MTVCrafter/Wan2_1-I2V-14B-MTV-Crafter_fp8_e4m3fn_scaled_KJ.safetensors",
       "Fun/Wan2_2-Fun-Control-A14B-HIGH_fp8_e4m3fn_scaled_KJ_fixed.safetensors",
