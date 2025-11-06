@@ -930,9 +930,14 @@ class MissingModelsExtension:
         """
         global download_progress
 
+        # Normalize path separators for cross-platform compatibility
+        model_name = self._normalize_path(model_name)
+
         # If no actual_filename provided, it's the same as model_name
         if not actual_filename:
             actual_filename = model_name
+        else:
+            actual_filename = self._normalize_path(actual_filename)
 
         # Log if we're doing a rename
         if actual_filename != model_name:

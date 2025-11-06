@@ -685,10 +685,12 @@ class MissingModelsDialog extends ComfyDialog {
             }, [
                 $el("div.progress-fill", {
                     style: {
-                        width: '0%',
+                        width: '100%',
                         height: '100%',
                         backgroundColor: '#6c9',
-                        transition: 'width 0.3s ease',
+                        transform: 'scaleX(0)',
+                        transformOrigin: 'left',
+                        transition: 'transform 0.3s ease',
                         borderRadius: '4px'
                     }
                 })
@@ -712,7 +714,7 @@ class MissingModelsDialog extends ComfyDialog {
 
     updateScanProgress(progress) {
         if (this._scanProgressFill) {
-            this._scanProgressFill.style.width = `${progress.progress}%`;
+            this._scanProgressFill.style.transform = `scaleX(${progress.progress / 100})`;
         }
         if (this._scanProgressMessage) {
             this._scanProgressMessage.textContent = progress.message || 'Scanning...';
@@ -967,10 +969,12 @@ class MissingModelsDialog extends ComfyDialog {
         }, [
             $el("div.progress-fill", {
                 style: {
-                    width: '0%',
+                    width: '100%',
                     height: '100%',
                     background: `linear-gradient(90deg, ${COLORS.PRIMARY_BLUE} 0%, #00A0E3 100%)`,
-                    transition: 'width 0.3s ease',
+                    transform: 'scaleX(0)',
+                    transformOrigin: 'left',
+                    transition: 'transform 0.3s ease',
                     boxShadow: '0 0 10px rgba(0, 102, 204, 0.5)',
                     animation: 'none'
                 }
@@ -1052,7 +1056,7 @@ class MissingModelsDialog extends ComfyDialog {
                             fontWeight: '400'
                         }
                     }),
-                    hasUrl ? $el("div", {
+                    hasUrl ? (model._urlDisplay = $el("div", {
                         textContent: `URL: ${this.truncateUrl(model.url)}`,
                         title: model.url,
                         style: {
@@ -1062,7 +1066,7 @@ class MissingModelsDialog extends ComfyDialog {
                             lineHeight: '1.5',
                             fontWeight: '400'
                         }
-                    }) : $el("div", {
+                    })) : $el("div", {
                         textContent: "URL: Not available - manual download required",
                         style: {
                             fontSize: '11px',
@@ -1232,7 +1236,7 @@ class MissingModelsDialog extends ComfyDialog {
                     requestAnimationFrame(() => {
                         // Update progress bar
                         if (progressFill) {
-                            progressFill.style.width = `${progress.progress}%`;
+                            progressFill.style.transform = `scaleX(${progress.progress / 100})`;
                         }
 
                         // Update status text
@@ -1269,6 +1273,29 @@ class MissingModelsDialog extends ComfyDialog {
                             model._downloadButton.textContent = "Retry";
                             model._downloadButton.disabled = false;
 
+                            // Add Search HuggingFace button for failed downloads
+                            if (!model._searchButton) {
+                                model._searchButton = createStyledButton("Search HF", {
+                                    color: COLORS.PRIMARY_BLUE,
+                                    hoverColor: COLORS.PRIMARY_BLUE_HOVER,
+                                    activeColor: COLORS.PRIMARY_BLUE_ACTIVE,
+                                    extraStyles: {
+                                        padding: '8px 16px',
+                                        fontSize: '13px',
+                                        marginLeft: '8px'
+                                    },
+                                    onClick: async () => {
+                                        await this.searchAndReplaceModel(model);
+                                    }
+                                });
+
+                                // Insert search button after download button
+                                model._downloadButton.parentNode.insertBefore(
+                                    model._searchButton,
+                                    model._downloadButton.nextSibling
+                                );
+                            }
+
                             // Update Download All button state
                             this.updateDownloadAllButtonState();
                         } else if (progress.status === 'cancelled') {
@@ -1293,6 +1320,55 @@ class MissingModelsDialog extends ComfyDialog {
             500, // Poll every 500ms
             (error) => console.error("[Missing Models] Poll error:", error)
         );
+    }
+
+    async searchAndReplaceModel(model) {
+        try {
+            model._statusText.textContent = 'Searching HuggingFace...';
+            model._statusText.style.color = COLORS.PRIMARY_BLUE;
+            model._searchButton.disabled = true;
+
+            const response = await api.fetchApi('/download-missing/search-hf', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    model_name: model.name,
+                    folder_type: model.folder
+                })
+            });
+
+            const result = await response.json();
+
+            if (result.status === 'success' && result.results && result.results.length > 0) {
+                model._statusText.textContent = `Found ${result.count} result(s). Using first match.`;
+                model._statusText.style.color = COLORS.PROGRESS_GREEN;
+
+                // Update model with first search result
+                const firstResult = result.results[0];
+                model.url = firstResult.download_url;
+                model.actual_filename = firstResult.actual_filename;
+                model.expected_filename = model.name;
+
+                // Update URL display if it exists
+                if (model._urlDisplay) {
+                    model._urlDisplay.textContent = `URL: ${this.truncateUrl(model.url)}`;
+                    model._urlDisplay.title = model.url;
+                }
+
+                // Change button to "Download" and enable retry with new URL
+                model._downloadButton.textContent = "Download";
+                model._downloadButton.disabled = false;
+            } else {
+                model._statusText.textContent = 'No results found on HuggingFace';
+                model._statusText.style.color = COLORS.WARNING_ORANGE;
+                model._searchButton.disabled = false;
+            }
+        } catch (error) {
+            console.error("[Missing Models] Search error:", error);
+            model._statusText.textContent = `Search error: ${error.message}`;
+            model._statusText.style.color = COLORS.ERROR_RED;
+            model._searchButton.disabled = false;
+        }
     }
 
     async downloadAllModels() {
