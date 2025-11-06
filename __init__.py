@@ -11,9 +11,6 @@ import asyncio
 import aiohttp
 import aiofiles
 import logging
-import traceback
-import urllib.parse
-import random
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from aiohttp import web
@@ -55,6 +52,7 @@ NODE_TYPE_TO_FOLDER = {
     # 'VAELoader': 'vae',
     # 'ControlNetLoader': 'controlnet',
     'WanVideoModelLoader': 'diffusion_models',
+    'LoadWanVideoT5TextEncoder': 'text_encoders',
 }
 
 class MissingModelsExtension:
@@ -130,6 +128,11 @@ class MissingModelsExtension:
                 model_folder = data.get('model_folder')
                 expected_filename = data.get('expected_filename')  # What the workflow needs
                 actual_filename = data.get('actual_filename')  # What HuggingFace has (if different)
+                node_id = data.get('node_id')
+                node_type = data.get('node_type')
+                correction_type = data.get('correction_type')
+                widget_index = data.get('widget_index')
+                property_index = data.get('property_index')
 
                 if not model_name or not model_url:
                     return web.json_response({
@@ -161,9 +164,28 @@ class MissingModelsExtension:
                 )
                 download_tasks[expected_filename] = task
 
+                # Generate correction for node reference
+                correction = None
+                if node_id is not None and correction_type:
+                    correction = {
+                        'name': os.path.basename(model_name.replace('\\', '/')),
+                        'old_path': model_name,
+                        'new_path': expected_filename,
+                        'folder': model_folder,
+                        'directory': model_folder,
+                        'node_id': node_id,
+                        'node_type': node_type,
+                        'correction_type': correction_type
+                    }
+                    if correction_type == 'widget' and widget_index is not None:
+                        correction['widget_index'] = widget_index
+                    elif correction_type == 'property' and property_index is not None:
+                        correction['property_index'] = property_index
+
                 return web.json_response({
                     'status': 'success',
-                    'message': f'Download started for {expected_filename}'
+                    'message': f'Download started for {expected_filename}',
+                    'correction': correction
                 })
             except Exception as e:
                 logging.error(f"[Download Missing Models] Error starting download: {e}")
@@ -341,7 +363,9 @@ class MissingModelsExtension:
                                     'folder': model_folder,
                                     'directory': model_folder,  # Add directory field for UI
                                     'node_id': node.get('id'),
-                                    'node_type': node.get('type')
+                                    'node_type': node.get('type'),
+                                    'correction_type': 'property',
+                                    'property_index': property_idx
                                 })
 
             # Only check widgets_values if no models were found in properties
@@ -403,7 +427,9 @@ class MissingModelsExtension:
                                 'directory': folder_type,
                                 'needs_folder_selection': folder_type == 'MANUAL_SELECTION_REQUIRED',
                                 'node_id': node.get('id'),
-                                'node_type': node_type
+                                'node_type': node_type,
+                                'correction_type': 'widget',
+                                'widget_index': widget_idx
                             })
                         else:
                             # No URL - needs HF search
@@ -413,7 +439,9 @@ class MissingModelsExtension:
                                 'directory': folder_type,
                                 'needs_folder_selection': folder_type == 'MANUAL_SELECTION_REQUIRED',
                                 'node_id': node.get('id'),
-                                'node_type': node_type
+                                'node_type': node_type,
+                                'correction_type': 'widget',
+                                'widget_index': widget_idx
                             })
 
             # Update progress for each node
@@ -541,26 +569,52 @@ class MissingModelsExtension:
 
         return None
 
+    def resolve_folder_key(self, folder_type: str) -> str:
+        """
+        Resolve a folder type to the actual ComfyUI folder key.
+
+        This handles cases where the extension uses user-friendly names
+        (like 'diffusion_models') but ComfyUI has registered the folder
+        with a different key (like 'unet').
+
+        Args:
+            folder_type: The folder type to resolve
+
+        Returns:
+            The actual ComfyUI folder key to use
+        """
+        # Map of user-friendly names to potential ComfyUI keys (in priority order)
+        folder_map = {
+            'checkpoints': ['checkpoints'],
+            'loras': ['loras'],
+            'lora': ['loras'],
+            'vae': ['vae'],
+            'controlnet': ['controlnet'],
+            'clip': ['text_encoders', 'clip'],
+            'clip_vision': ['clip_vision'],
+            'unet': ['unet', 'diffusion_models'],
+            'diffusion_models': ['diffusion_models', 'unet'],
+            'embeddings': ['embeddings'],
+            'hypernetworks': ['hypernetworks'],
+            'upscale_models': ['upscale_models'],
+        }
+
+        # Get list of potential keys to try
+        potential_keys = folder_map.get(folder_type.lower(), [folder_type])
+
+        # Check which key ComfyUI actually has registered
+        for key in potential_keys:
+            if key in folder_paths.folder_names_and_paths:
+                return key
+
+        # If none found, return the first potential key (fallback)
+        return potential_keys[0] if potential_keys else folder_type
+
     def is_model_installed(self, model_name: str, folder_type: str) -> bool:
         """Check if model exists at the exact specified path"""
         try:
-            # Map folder types to folder_paths keys
-            folder_map = {
-                'checkpoints': 'checkpoints',
-                'loras': 'loras',
-                'lora': 'loras',
-                'vae': 'vae',
-                'controlnet': 'controlnet',
-                'clip': 'text_encoders',
-                'clip_vision': 'clip_vision',
-                'unet': 'diffusion_models',
-                'diffusion_models': 'diffusion_models',
-                'embeddings': 'embeddings',
-                'hypernetworks': 'hypernetworks',
-                'upscale_models': 'upscale_models',
-            }
-
-            folder_key = folder_map.get(folder_type.lower(), folder_type)
+            # Resolve folder type to actual ComfyUI key
+            folder_key = self.resolve_folder_key(folder_type)
 
             if folder_key in folder_paths.folder_names_and_paths:
                 file_list = folder_paths.get_filename_list(folder_key)
@@ -591,23 +645,8 @@ class MissingModelsExtension:
             The actual path of the model if found, None otherwise
         """
         try:
-            # Map folder types to folder_paths keys
-            folder_map = {
-                'checkpoints': 'checkpoints',
-                'loras': 'loras',
-                'lora': 'loras',
-                'vae': 'vae',
-                'controlnet': 'controlnet',
-                'clip': 'text_encoders',
-                'clip_vision': 'clip_vision',
-                'unet': 'diffusion_models',
-                'diffusion_models': 'diffusion_models',
-                'embeddings': 'embeddings',
-                'hypernetworks': 'hypernetworks',
-                'upscale_models': 'upscale_models',
-            }
-
-            folder_key = folder_map.get(folder_type.lower(), folder_type)
+            # Resolve folder type to actual ComfyUI key
+            folder_key = self.resolve_folder_key(folder_type)
 
             if folder_key not in folder_paths.folder_names_and_paths:
                 return None
@@ -677,44 +716,48 @@ class MissingModelsExtension:
             all_registered_folders = list(folder_paths.folder_names_and_paths.keys())
             logging.debug(f"[Download Missing Models] All registered ComfyUI folders: {all_registered_folders}")
 
-            # Folder types to search with their mappings
-            folder_map = {
-                'checkpoints': 'checkpoints',
-                'loras': 'loras',
-                'vae': 'vae',
-                'controlnet': 'controlnet',
-                'clip': 'text_encoders',
-                'unet': 'diffusion_models',
-                'embeddings': 'embeddings',
-                'hypernetworks': 'hypernetworks',
-                'upscale_models': 'upscale_models',
-            }
+            # Folder types to search (we'll resolve these to actual keys)
+            folder_types = [
+                'checkpoints',
+                'loras',
+                'vae',
+                'controlnet',
+                'clip',
+                'unet',
+                'diffusion_models',
+                'embeddings',
+                'hypernetworks',
+                'upscale_models',
+            ]
 
-            # Add all other registered folders that we don't have in our map
+            # Add all other registered folders
             for folder_key in all_registered_folders:
-                if folder_key not in folder_map.values():
-                    folder_map[folder_key] = folder_key
+                if folder_key not in folder_types:
+                    folder_types.append(folder_key)
 
             # Use path heuristics to prioritize search order
-            search_order = list(folder_map.items())
+            search_order = folder_types
             model_name_lower = model_name.lower()
 
             # Prioritize based on path hints
             if 'lora' in model_name_lower:
-                search_order = [('loras', 'loras')] + [x for x in search_order if x[0] != 'loras']
+                search_order = ['loras'] + [x for x in search_order if x != 'loras']
             elif 'vae' in model_name_lower:
-                search_order = [('vae', 'vae')] + [x for x in search_order if x[0] != 'vae']
+                search_order = ['vae'] + [x for x in search_order if x != 'vae']
             elif 'checkpoint' in model_name_lower or 'ckpt' in model_name_lower:
-                search_order = [('checkpoints', 'checkpoints')] + [x for x in search_order if x[0] != 'checkpoints']
+                search_order = ['checkpoints'] + [x for x in search_order if x != 'checkpoints']
             elif 'controlnet' in model_name_lower:
-                search_order = [('controlnet', 'controlnet')] + [x for x in search_order if x[0] != 'controlnet']
+                search_order = ['controlnet'] + [x for x in search_order if x != 'controlnet']
             elif 'clip' in model_name_lower or 'text_encoder' in model_name_lower:
-                search_order = [('clip', 'text_encoders')] + [x for x in search_order if x[0] != 'clip']
+                search_order = ['clip'] + [x for x in search_order if x != 'clip']
             elif 'unet' in model_name_lower or 'diffusion' in model_name_lower:
-                search_order = [('unet', 'diffusion_models')] + [x for x in search_order if x[0] != 'unet']
+                search_order = ['unet'] + [x for x in search_order if x != 'unet']
 
             # Search each folder type
-            for folder_type, folder_key in search_order:
+            for folder_type in search_order:
+                # Resolve to actual ComfyUI key
+                folder_key = self.resolve_folder_key(folder_type)
+
                 if folder_key not in folder_paths.folder_names_and_paths:
                     continue
 
@@ -769,11 +812,11 @@ class MissingModelsExtension:
         elif 'controlnet' in node_lower:
             return 'controlnet'
         elif 'clip' in node_lower and 'vision' not in node_lower:
-            return 'clip'
+            return 'text_encoders'
         elif 'clip_vision' in node_lower or 'clipvision' in node_lower:
             return 'clip_vision'
         elif 'unet' in node_lower or 'diffusion' in node_lower:
-            return 'unet'
+            return 'diffusion_models'
         elif 'upscale' in node_lower or 'upscaler' in node_lower:
             return 'upscale_models'
         elif 'embedding' in node_lower:
@@ -786,27 +829,20 @@ class MissingModelsExtension:
 
     def get_model_destination(self, folder_type: str) -> str:
         """Get the full path to the model folder"""
-        folder_map = {
-            'checkpoints': 'checkpoints',
-            'loras': 'loras',
-            'lora': 'loras',
-            'vae': 'vae',
-            'controlnet': 'controlnet',
-            'clip': 'text_encoders',
-            'clip_vision': 'clip_vision',
-            'unet': 'diffusion_models',
-            'diffusion_models': 'diffusion_models',
-            'embeddings': 'embeddings',
-            'hypernetworks': 'hypernetworks',
-            'upscale_models': 'upscale_models',
-        }
-
-        folder_key = folder_map.get(folder_type.lower(), folder_type)
+        # Resolve folder type to actual ComfyUI key
+        folder_key = self.resolve_folder_key(folder_type)
 
         if folder_key in folder_paths.folder_names_and_paths:
             folders = folder_paths.get_folder_paths(folder_key)
             if folders:
-                return folders[0]  # Use first folder path
+                # Prefer the folder path that matches the folder_type name
+                # (e.g., if folder_type is "diffusion_models", prefer models/diffusion_models/ over models/unet/)
+                for folder in folders:
+                    if folder.rstrip(os.sep).endswith(folder_type):
+                        return folder
+
+                # If no match, use first folder path (convention)
+                return folders[0]
 
         # Fallback
         models_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', '..', 'models')
@@ -858,9 +894,9 @@ class MissingModelsExtension:
                 download_progress[model_name]['total'] = total_size
 
                 downloaded = 0
+                last_update_bytes = 0
                 chunk_size = 4194304  # 4MB chunks (optimized for large files)
-                progress_update_threshold = 5  # Update progress every 5 chunks (every 20MB)
-                chunk_counter = 0
+                update_interval_bytes = 20 * 1024 * 1024  # Update every 20MB
 
                 # Use async file I/O to avoid blocking the event loop
                 async with aiofiles.open(temp_path, 'wb') as f:
@@ -868,14 +904,14 @@ class MissingModelsExtension:
                         if chunk:
                             await f.write(chunk)
                             downloaded += len(chunk)
-                            chunk_counter += 1
 
-                            # Throttled progress updates (every 20MB or on last chunk)
-                            if chunk_counter % progress_update_threshold == 0 or downloaded >= total_size:
+                            # Byte-based throttled progress updates (every 20MB or on last chunk)
+                            if downloaded - last_update_bytes >= update_interval_bytes or downloaded >= total_size:
                                 download_progress[model_name]['downloaded'] = downloaded
                                 if total_size > 0:
                                     progress = (downloaded / total_size) * 100
                                     download_progress[model_name]['progress'] = round(progress, 2)
+                                last_update_bytes = downloaded
 
                     # Move temp file to final location
                     if os.path.exists(dest_path):
@@ -885,8 +921,9 @@ class MissingModelsExtension:
                     # Mark as complete
                     download_progress[model_name]['status'] = 'completed'
                     download_progress[model_name]['progress'] = 100
+                    download_progress[model_name]['downloaded'] = downloaded
 
-                    logging.info(f"[Download Missing Models] Successfully downloaded {model_name}")
+                    logging.info(f"[Download Missing Models] Successfully downloaded {model_name} ({downloaded / 1024 / 1024:.2f} MB)")
 
         except asyncio.CancelledError:
             # Clean up temp file
@@ -909,92 +946,6 @@ class MissingModelsExtension:
             # Clean up task reference
             if model_name in download_tasks:
                 del download_tasks[model_name]
-
-    def fuzzy_match_score(self, query: str, target: str) -> float:
-        """
-        Calculate simple fuzzy match score between two strings.
-
-        Args:
-            query: The search query
-            target: The target string to match against
-
-        Returns:
-            Float between 0 and 1, where 1 is exact match
-        """
-        query_lower = query.lower()
-        target_lower = target.lower()
-
-        # Exact match
-        if query_lower == target_lower:
-            return 1.0
-
-        # Substring match
-        if query_lower in target_lower:
-            return 0.8
-
-        # Calculate character overlap ratio
-        query_chars = set(query_lower)
-        target_chars = set(target_lower)
-        overlap = len(query_chars & target_chars)
-        total = len(query_chars | target_chars)
-
-        return overlap / total if total > 0 else 0.0
-
-    def extract_search_queries(self, filename: str) -> List[str]:
-        """
-        Extract multiple search queries from a filename, from most specific to most general.
-
-        Args:
-            filename: The model filename (with or without extension)
-
-        Returns:
-            List of search queries to try in order
-        """
-        # Remove extension
-        name_no_ext = filename.rsplit('.', 1)[0]
-
-        # Remove common quantization/technical suffixes
-        technical_patterns = [
-            r'_fp8.*$', r'_fp16.*$', r'_fp32.*$', r'_bf16.*$',
-            r'_int8.*$', r'_int4.*$',
-            r'_q[0-9]_.*$', r'_q[0-9]$',
-            r'_e4m3fn.*$', r'_scaled.*$', r'_pruned.*$',
-            r'_ema.*$', r'_ckpt.*$'
-        ]
-
-        cleaned = name_no_ext
-        for pattern in technical_patterns:
-            cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
-
-        queries = []
-
-        # Try cleaned version first
-        if cleaned != name_no_ext:
-            queries.append(cleaned)
-
-        # Try original without extension
-        queries.append(name_no_ext)
-
-        # Try just the first major component (before first separator)
-        separators = ['_', '-', '.']
-        for sep in separators:
-            parts = cleaned.split(sep)
-            if len(parts) > 1 and len(parts[0]) > 2:
-                first_part = parts[0]
-                if first_part not in queries:
-                    queries.append(first_part)
-                break
-
-        # Try first 2-3 meaningful tokens
-        tokens = re.split(r'[_\-.]', cleaned)
-        # Filter out very short tokens and numbers-only
-        meaningful_tokens = [t for t in tokens if len(t) > 2 and not t.isdigit()]
-        if len(meaningful_tokens) >= 2:
-            combined = ' '.join(meaningful_tokens[:2])
-            if combined not in queries:
-                queries.append(combined)
-
-        return queries
 
     def parse_hf_url(self, url: str) -> Optional[dict]:
         """

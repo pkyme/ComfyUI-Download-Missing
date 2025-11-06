@@ -1009,12 +1009,23 @@ class MissingModelsDialog extends ComfyDialog {
                     model_url: model.url,
                     model_folder: model.folder,
                     expected_filename: model.expected_filename || model.name,  // What workflow needs
-                    actual_filename: model.actual_filename || model.name  // What HuggingFace has
+                    actual_filename: model.actual_filename || model.name,  // What HuggingFace has
+                    node_id: model.node_id,
+                    node_type: model.node_type,
+                    correction_type: model.correction_type,
+                    widget_index: model.widget_index,
+                    property_index: model.property_index
                 })
             });
 
             if (!response.ok) {
                 throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+
+            // Parse response and apply correction if provided
+            const result = await response.json();
+            if (result.correction) {
+                this.applyCorrectionsToGraph([result.correction]);
             }
 
             // Start polling for progress
@@ -1035,7 +1046,8 @@ class MissingModelsDialog extends ComfyDialog {
     async pollProgress(model) {
         const pollInterval = setInterval(async () => {
             try {
-                const response = await api.fetchApi(`/download-missing/status/${encodeURIComponent(model.name)}`);
+                const pollKey = model.expected_filename || model.name;
+                const response = await api.fetchApi(`/download-missing/status/${encodeURIComponent(pollKey)}`);
 
                 if (!response.ok) {
                     clearInterval(pollInterval);
