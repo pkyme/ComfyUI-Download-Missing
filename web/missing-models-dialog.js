@@ -32,8 +32,14 @@ class MissingModelsDialog extends ComfyDialog {
         this.availableFolders = [];
 
         // Scroll interaction tracking for preventing DOM updates during drag scrolling
-        this.mouseDownHandler = null;
-        this.mouseUpHandler = null;
+        this.pointerDownHandler = null;
+        this.pointerUpHandler = null;
+        this.scrollHandler = null;
+        this.wheelHandler = null;
+        this.pointerButtons = 0;
+        this.lastWheelEventTime = 0;
+        this.scrollReleaseTimeout = null;
+        this.isScrollbarDrag = false;
 
         this.element = $el("div.comfy-modal", {
             id: 'missing-models-dialog',
@@ -118,17 +124,21 @@ class MissingModelsDialog extends ComfyDialog {
             })
         ]);
 
-        // Attach drag listeners to pause UI updates while scrollbar is held
-        this.mouseDownHandler = () => {
-            this.isMouseDown = true;
-            this.freezeUI();
+        // Attach listeners to detect scrollbar dragging and pause UI updates
+        const passiveOptions = { passive: true };
+        this.wheelHandler = () => {
+            this.lastWheelEventTime = performance.now();
         };
-        this.modelsListElement.addEventListener('mousedown', this.mouseDownHandler);
-        this.mouseUpHandler = () => {
-            this.isMouseDown = false;
-            this.unfreezeUI();
-        };
-        document.addEventListener('mouseup', this.mouseUpHandler);
+        this.modelsListElement.addEventListener('wheel', this.wheelHandler, passiveOptions);
+
+        this.scrollHandler = (event) => this.handleModelsListScroll(event);
+        this.modelsListElement.addEventListener('scroll', this.scrollHandler, passiveOptions);
+
+        this.pointerDownHandler = (event) => this.handlePointerDown(event);
+        this.pointerUpHandler = () => this.handlePointerUp();
+        window.addEventListener('pointerdown', this.pointerDownHandler, true);
+        window.addEventListener('pointerup', this.pointerUpHandler, true);
+        window.addEventListener('pointercancel', this.pointerUpHandler, true);
 
         this.downloadAllButton = createStyledButton("Download All", {
             color: COLORS.PRIMARY_GREEN,
@@ -192,7 +202,7 @@ class MissingModelsDialog extends ComfyDialog {
     }
 
     unfreezeUI() {
-        if (this.isMouseDown) {
+        if (this.isMouseDown || this.isScrollbarDrag) {
             return;
         }
         if (!this.uiFrozen) {
@@ -223,6 +233,68 @@ class MissingModelsDialog extends ComfyDialog {
             } catch (err) {
                 console.error("[Missing Models] Deferred UI update failed:", err);
             }
+        }
+    }
+
+    handlePointerDown(event) {
+        const buttons = typeof event.buttons === 'number' ? event.buttons : (1 << (event.button ?? 0));
+        this.pointerButtons = buttons;
+
+        if (!this.modelsListElement) {
+            return;
+        }
+
+        const isPrimaryPointer = (buttons & 1) === 1 || event.pointerType !== 'mouse';
+        if (isPrimaryPointer && this.modelsListElement.contains(event.target)) {
+            this.isMouseDown = true;
+            this.freezeUI();
+        }
+    }
+
+    handlePointerUp() {
+        this.pointerButtons = 0;
+        this.isMouseDown = false;
+        this.isScrollbarDrag = false;
+        this.clearScrollReleaseTimeout();
+        this.unfreezeUI();
+    }
+
+    handleModelsListScroll(event) {
+        if (!event.isTrusted || event.target !== this.modelsListElement) {
+            return;
+        }
+
+        // Ignore programmatic scrolls to avoid needless freezes
+        const hovered = this.modelsListElement.matches(':hover');
+        const pointerActive = (this.pointerButtons & 1) === 1 || this.isMouseDown;
+        const now = performance.now();
+        const wheelRecently = (now - this.lastWheelEventTime) < 80;
+
+        if (!pointerActive && wheelRecently) {
+            return; // Likely mouse wheel/trackpad scroll
+        }
+
+        if (!hovered && !pointerActive && !this.isScrollbarDrag) {
+            return;
+        }
+
+        this.isScrollbarDrag = true;
+        this.freezeUI();
+        this.scheduleScrollbarRelease();
+    }
+
+    scheduleScrollbarRelease() {
+        this.clearScrollReleaseTimeout();
+        this.scrollReleaseTimeout = setTimeout(() => {
+            this.isScrollbarDrag = false;
+            this.unfreezeUI();
+        }, 150);
+    }
+
+    clearScrollReleaseTimeout() {
+        if (this.scrollReleaseTimeout) {
+            clearTimeout(this.scrollReleaseTimeout);
+            this.scrollReleaseTimeout = null;
         }
     }
 
@@ -1291,6 +1363,9 @@ class MissingModelsDialog extends ComfyDialog {
         this.domUpdateQueue = [];
         this.uiFrozen = false;
         this.isMouseDown = false;
+        this.isScrollbarDrag = false;
+        this.pointerButtons = 0;
+        this.clearScrollReleaseTimeout();
         this.modelsListElement.innerHTML = '';
         this.updateStatus("Initializing...", STATUS_TYPES.INFO);
 
@@ -1314,18 +1389,12 @@ class MissingModelsDialog extends ComfyDialog {
             this.element.style.display = "none";
         }, 300);
 
-        // Clean up drag listeners
-        if (this.modelsListElement && this.mouseDownHandler) {
-            this.modelsListElement.removeEventListener('mousedown', this.mouseDownHandler);
-        }
-        if (this.mouseUpHandler) {
-            document.removeEventListener('mouseup', this.mouseUpHandler);
-            this.mouseUpHandler = null;
-        }
-
         // Reset freeze state
+        this.clearScrollReleaseTimeout();
+        this.pointerButtons = 0;
         this.uiFrozen = false;
         this.isMouseDown = false;
+        this.isScrollbarDrag = false;
         this.pendingProgressUpdates.clear();
         this.domUpdateQueue = [];
 
