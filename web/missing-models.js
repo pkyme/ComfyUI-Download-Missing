@@ -316,6 +316,14 @@ class MissingModelsDialog extends ComfyDialog {
         this.progressInterval = null;
         this.availableFolders = [];
 
+        // Scroll interaction tracking for preventing DOM updates during scrolling
+        this.isUserScrolling = false;
+        this.scrollTimeout = null;
+        this.scrollEventHandler = null;
+        this.mouseDownHandler = null;
+        this.wheelHandler = null;
+        this.keyDownHandler = null;
+
         this.element = $el("div.comfy-modal", {
             id: 'missing-models-dialog',
             parent: document.body,
@@ -399,6 +407,38 @@ class MissingModelsDialog extends ComfyDialog {
             })
         ]);
 
+        // Add event listeners to prevent DOM updates during scrolling
+        // Scroll event for debounce mechanism
+        this.scrollEventHandler = () => {
+            this.handleScrollStart();
+            this.handleScrollEnd();
+        };
+
+        // Mousedown event catches scrollbar clicks BEFORE scroll position changes
+        this.mouseDownHandler = () => {
+            this.handleScrollStart();
+        };
+
+        // Wheel event catches mouse wheel scrolling BEFORE scroll position changes
+        this.wheelHandler = () => {
+            this.handleScrollStart();
+        };
+
+        // Keydown event catches keyboard scrolling BEFORE scroll position changes
+        this.keyDownHandler = (e) => {
+            // Only capture keys that trigger scrolling
+            if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+                 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(e.key)) {
+                this.handleScrollStart();
+            }
+        };
+
+        // Attach all event listeners
+        this.modelsListElement.addEventListener('scroll', this.scrollEventHandler);
+        this.modelsListElement.addEventListener('mousedown', this.mouseDownHandler);
+        this.modelsListElement.addEventListener('wheel', this.wheelHandler);
+        this.modelsListElement.addEventListener('keydown', this.keyDownHandler);
+
         this.downloadAllButton = createStyledButton("Download All", {
             color: COLORS.PRIMARY_GREEN,
             hoverColor: COLORS.PRIMARY_GREEN_HOVER,
@@ -454,6 +494,24 @@ class MissingModelsDialog extends ComfyDialog {
             this.modelsListElement,
             this.buttonsElement
         ]);
+    }
+
+    handleScrollStart() {
+        this.isUserScrolling = true;
+        if (this.scrollTimeout) {
+            clearTimeout(this.scrollTimeout);
+            this.scrollTimeout = null;
+        }
+    }
+
+    handleScrollEnd() {
+        // Use debouncing to detect when scrolling has stopped
+        if (this.scrollTimeout) {
+            clearTimeout(this.scrollTimeout);
+        }
+        this.scrollTimeout = setTimeout(() => {
+            this.isUserScrolling = false;
+        }, 150); // 150ms debounce delay
     }
 
     async loadAvailableFolders() {
@@ -685,12 +743,10 @@ class MissingModelsDialog extends ComfyDialog {
             }, [
                 $el("div.progress-fill", {
                     style: {
-                        width: '100%',
+                        width: '0%',
                         height: '100%',
                         backgroundColor: '#6c9',
-                        transform: 'scaleX(0)',
-                        transformOrigin: 'left',
-                        transition: 'transform 0.3s ease',
+                        transition: 'width 0.3s ease',
                         borderRadius: '4px'
                     }
                 })
@@ -714,7 +770,7 @@ class MissingModelsDialog extends ComfyDialog {
 
     updateScanProgress(progress) {
         if (this._scanProgressFill) {
-            this._scanProgressFill.style.transform = `scaleX(${progress.progress / 100})`;
+            this._scanProgressFill.style.width = `${progress.progress}%`;
         }
         if (this._scanProgressMessage) {
             this._scanProgressMessage.textContent = progress.message || 'Scanning...';
@@ -969,12 +1025,10 @@ class MissingModelsDialog extends ComfyDialog {
         }, [
             $el("div.progress-fill", {
                 style: {
-                    width: '100%',
+                    width: '0%',
                     height: '100%',
                     background: `linear-gradient(90deg, ${COLORS.PRIMARY_BLUE} 0%, #00A0E3 100%)`,
-                    transform: 'scaleX(0)',
-                    transformOrigin: 'left',
-                    transition: 'transform 0.3s ease',
+                    transition: 'width 0.3s ease',
                     boxShadow: '0 0 10px rgba(0, 102, 204, 0.5)',
                     animation: 'none'
                 }
@@ -1232,84 +1286,63 @@ class MissingModelsDialog extends ComfyDialog {
                 if (data.status === 'success' && data.progress) {
                     const progress = data.progress;
 
-                    // Use requestAnimationFrame to sync DOM updates with browser paint cycle
-                    requestAnimationFrame(() => {
-                        // Update progress bar
+                    // Skip DOM updates if user is actively scrolling to prevent position jumps
+                    if (this.isUserScrolling) {
+                        return;
+                    }
+
+                    // Update progress bar
+                    if (progressFill) {
+                        progressFill.style.width = `${progress.progress}%`;
+                    }
+
+                    // Update status text
+                    if (progress.status === 'downloading') {
+                        const downloadedMB = (progress.downloaded / (1024 * 1024)).toFixed(2);
+                        const totalMB = (progress.total / (1024 * 1024)).toFixed(2);
+                        model._statusText.textContent = `Downloading: ${downloadedMB} MB / ${totalMB} MB (${progress.progress}%)`;
+                        model._statusText.style.color = COLORS.PROGRESS_GREEN;
+                        // Add pulsing animation
                         if (progressFill) {
-                            progressFill.style.transform = `scaleX(${progress.progress / 100})`;
+                            progressFill.classList.add('progress-downloading');
+                        }
+                    } else if (progress.status === 'completed') {
+                        this.downloadingModels.delete(model.name);
+
+                        // Remove pulsing animation
+                        if (progressFill) {
+                            progressFill.classList.remove('progress-downloading');
                         }
 
-                        // Update status text
-                        if (progress.status === 'downloading') {
-                            const downloadedMB = (progress.downloaded / (1024 * 1024)).toFixed(2);
-                            const totalMB = (progress.total / (1024 * 1024)).toFixed(2);
-                            model._statusText.textContent = `Downloading: ${downloadedMB} MB / ${totalMB} MB (${progress.progress}%)`;
-                            model._statusText.style.color = COLORS.PROGRESS_GREEN;
-                            // Add pulsing animation
-                            if (progressFill) {
-                                progressFill.classList.add('progress-downloading');
-                            }
-                        } else if (progress.status === 'completed') {
-                            this.downloadingModels.delete(model.name);
+                        model._statusText.textContent = 'Download completed!';
+                        model._statusText.style.color = COLORS.PROGRESS_GREEN;
+                        model._downloadButton.textContent = "Completed";
+                        model._downloadButton.style.backgroundColor = COLORS.PRIMARY_GREEN;
+                        model._card.style.opacity = '0.7';
 
-                            // Remove pulsing animation
-                            if (progressFill) {
-                                progressFill.classList.remove('progress-downloading');
-                            }
+                        // Update Download All button state
+                        this.updateDownloadAllButtonState();
+                    } else if (progress.status === 'error') {
+                        this.downloadingModels.delete(model.name);
 
-                            model._statusText.textContent = 'Download completed!';
-                            model._statusText.style.color = COLORS.PROGRESS_GREEN;
-                            model._downloadButton.textContent = "Completed";
-                            model._downloadButton.style.backgroundColor = COLORS.PRIMARY_GREEN;
-                            model._card.style.opacity = '0.7';
+                        model._statusText.textContent = `Error: ${progress.error || 'Unknown error'}`;
+                        model._statusText.style.color = COLORS.ERROR_RED;
+                        model._downloadButton.textContent = "Failed";
+                        model._downloadButton.disabled = true;
 
-                            // Update Download All button state
-                            this.updateDownloadAllButtonState();
-                        } else if (progress.status === 'error') {
-                            this.downloadingModels.delete(model.name);
+                        // Update Download All button state
+                        this.updateDownloadAllButtonState();
+                    } else if (progress.status === 'cancelled') {
+                        this.downloadingModels.delete(model.name);
 
-                            model._statusText.textContent = `Error: ${progress.error || 'Unknown error'}`;
-                            model._statusText.style.color = COLORS.ERROR_RED;
-                            model._downloadButton.textContent = "Retry";
-                            model._downloadButton.disabled = false;
+                        model._statusText.textContent = 'Download cancelled';
+                        model._statusText.style.color = COLORS.WARNING_ORANGE;
+                        model._downloadButton.textContent = "Download";
+                        model._downloadButton.disabled = false;
 
-                            // Add Search HuggingFace button for failed downloads
-                            if (!model._searchButton) {
-                                model._searchButton = createStyledButton("Search HF", {
-                                    color: COLORS.PRIMARY_BLUE,
-                                    hoverColor: COLORS.PRIMARY_BLUE_HOVER,
-                                    activeColor: COLORS.PRIMARY_BLUE_ACTIVE,
-                                    extraStyles: {
-                                        padding: '8px 16px',
-                                        fontSize: '13px',
-                                        marginLeft: '8px'
-                                    },
-                                    onClick: async () => {
-                                        await this.searchAndReplaceModel(model);
-                                    }
-                                });
-
-                                // Insert search button after download button
-                                model._downloadButton.parentNode.insertBefore(
-                                    model._searchButton,
-                                    model._downloadButton.nextSibling
-                                );
-                            }
-
-                            // Update Download All button state
-                            this.updateDownloadAllButtonState();
-                        } else if (progress.status === 'cancelled') {
-                            this.downloadingModels.delete(model.name);
-
-                            model._statusText.textContent = 'Download cancelled';
-                            model._statusText.style.color = COLORS.WARNING_ORANGE;
-                            model._downloadButton.textContent = "Download";
-                            model._downloadButton.disabled = false;
-
-                            // Update Download All button state
-                            this.updateDownloadAllButtonState();
-                        }
-                    });
+                        // Update Download All button state
+                        this.updateDownloadAllButtonState();
+                    }
                 }
             },
             (data) => {
@@ -1320,55 +1353,6 @@ class MissingModelsDialog extends ComfyDialog {
             500, // Poll every 500ms
             (error) => console.error("[Missing Models] Poll error:", error)
         );
-    }
-
-    async searchAndReplaceModel(model) {
-        try {
-            model._statusText.textContent = 'Searching HuggingFace...';
-            model._statusText.style.color = COLORS.PRIMARY_BLUE;
-            model._searchButton.disabled = true;
-
-            const response = await api.fetchApi('/download-missing/search-hf', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    model_name: model.name,
-                    folder_type: model.folder
-                })
-            });
-
-            const result = await response.json();
-
-            if (result.status === 'success' && result.results && result.results.length > 0) {
-                model._statusText.textContent = `Found ${result.count} result(s). Using first match.`;
-                model._statusText.style.color = COLORS.PROGRESS_GREEN;
-
-                // Update model with first search result
-                const firstResult = result.results[0];
-                model.url = firstResult.download_url;
-                model.actual_filename = firstResult.actual_filename;
-                model.expected_filename = model.name;
-
-                // Update URL display if it exists
-                if (model._urlDisplay) {
-                    model._urlDisplay.textContent = `URL: ${this.truncateUrl(model.url)}`;
-                    model._urlDisplay.title = model.url;
-                }
-
-                // Change button to "Download" and enable retry with new URL
-                model._downloadButton.textContent = "Download";
-                model._downloadButton.disabled = false;
-            } else {
-                model._statusText.textContent = 'No results found on HuggingFace';
-                model._statusText.style.color = COLORS.WARNING_ORANGE;
-                model._searchButton.disabled = false;
-            }
-        } catch (error) {
-            console.error("[Missing Models] Search error:", error);
-            model._statusText.textContent = `Search error: ${error.message}`;
-            model._statusText.style.color = COLORS.ERROR_RED;
-            model._searchButton.disabled = false;
-        }
     }
 
     async downloadAllModels() {
@@ -1437,6 +1421,31 @@ class MissingModelsDialog extends ComfyDialog {
         setTimeout(() => {
             this.element.style.display = "none";
         }, 300);
+
+        // Clean up all event listeners
+        if (this.modelsListElement) {
+            if (this.scrollEventHandler) {
+                this.modelsListElement.removeEventListener('scroll', this.scrollEventHandler);
+            }
+            if (this.mouseDownHandler) {
+                this.modelsListElement.removeEventListener('mousedown', this.mouseDownHandler);
+            }
+            if (this.wheelHandler) {
+                this.modelsListElement.removeEventListener('wheel', this.wheelHandler);
+            }
+            if (this.keyDownHandler) {
+                this.modelsListElement.removeEventListener('keydown', this.keyDownHandler);
+            }
+        }
+
+        // Clear scroll timeout
+        if (this.scrollTimeout) {
+            clearTimeout(this.scrollTimeout);
+            this.scrollTimeout = null;
+        }
+
+        // Reset scroll flag
+        this.isUserScrolling = false;
 
         // Stop all downloads
         this.downloadingModels.forEach(modelName => {

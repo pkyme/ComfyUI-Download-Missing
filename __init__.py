@@ -357,6 +357,114 @@ class MissingModelsExtension:
             'folders': sorted(available_folders)
         })
 
+    async def validate_url(self, url: str) -> bool:
+        """
+        Validate a URL by sending a HEAD request
+
+        Args:
+            url: The URL to validate
+
+        Returns:
+            True if URL is accessible (2xx/3xx status), False otherwise
+        """
+        try:
+            async with self.session.head(url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                return response.status < 400
+        except Exception as e:
+            logging.warning(f"[Download Missing Models] URL validation failed for {url}: {e}")
+            return False
+
+    async def validate_urls_batch(self, models: list, scan_id: str = None) -> list:
+        """
+        Validate multiple model URLs concurrently with rate limiting
+
+        Args:
+            models: List of model dicts with 'url' key
+            scan_id: Optional scan ID for progress updates
+
+        Returns:
+            List of models with validation results
+        """
+        semaphore = asyncio.Semaphore(5)  # Max 5 concurrent validations
+        total = len(models)
+        completed = 0
+
+        async def validate_with_semaphore(model):
+            nonlocal completed
+            async with semaphore:
+                if model.get('url'):
+                    model['url_valid'] = await self.validate_url(model['url'])
+                    if not model['url_valid']:
+                        logging.info(f"[Download Missing Models] Invalid URL (404): {model['url']} for {model['name']}")
+                else:
+                    model['url_valid'] = False
+
+                completed += 1
+                if scan_id:
+                    self._update_scan_progress(scan_id, 67 + int(completed / total * 20), 'validating', f'Validating URLs ({completed}/{total})...')
+
+                return model
+
+        tasks = [validate_with_semaphore(model) for model in models]
+        return await asyncio.gather(*tasks)
+
+    async def auto_search_hf(self, model: dict) -> dict:
+        """
+        Automatically search HuggingFace and update model URL if found
+
+        Args:
+            model: Model dict with 'name' and 'folder' keys
+
+        Returns:
+            Updated model dict with URL from HF or marked as not_found
+        """
+        filename = os.path.basename(model['name'])
+        results = await self.search_popular_repos(filename)
+
+        if results:
+            # Use first result
+            first_result = results[0]
+            model['url'] = first_result['download_url']
+            model['url_source'] = 'hf_auto_search'
+            model['expected_filename'] = first_result.get('expected_filename', filename)
+            model['actual_filename'] = first_result.get('actual_filename', filename)
+            model['url_valid'] = True
+            logging.info(f"[Download Missing Models] Auto-found on HF: {model['url']}")
+        else:
+            # Mark as not found
+            model['url'] = None
+            model['url_valid'] = False
+            model['not_found'] = True
+            logging.info(f"[Download Missing Models] Could not find {model['name']} on HuggingFace")
+
+        return model
+
+    async def validate_and_resolve_model(self, model: dict) -> dict:
+        """
+        Validate model URL and auto-search HF if invalid
+
+        Args:
+            model: Model dict with 'url', 'name', 'folder'
+
+        Returns:
+            Updated model dict with valid URL or marked as not_found
+        """
+        if not model.get('url'):
+            # No URL - search HF
+            return await self.auto_search_hf(model)
+
+        # Validate existing URL
+        is_valid = await self.validate_url(model['url'])
+
+        if is_valid:
+            model['url_valid'] = True
+            return model
+        else:
+            # Invalid URL (404) - auto-search HF
+            logging.info(f"[Download Missing Models] URL invalid (404): {model['url']}")
+            model['original_url'] = model['url']  # Save original for debugging
+            return await self.auto_search_hf(model)
+
     def _update_scan_progress(self, scan_id: str, progress: int, stage: str, message: str):
         """Update scan progress tracking"""
         scan_progress[scan_id].update({
@@ -639,6 +747,31 @@ class MissingModelsExtension:
 
         # Combine models that already had URLs with newly resolved ones
         all_ready_to_download = unique_missing + resolved_models
+
+        # Validate URLs and auto-search HF if invalid
+        if all_ready_to_download:
+            self._update_scan_progress(scan_id, 87, 'validating', 'Validating model URLs...')
+
+            # Validate and resolve each model
+            validated_models = []
+            additional_not_found = []
+
+            for model in all_ready_to_download:
+                validated_model = await self.validate_and_resolve_model(model)
+
+                if validated_model.get('url') and validated_model.get('url_valid'):
+                    validated_models.append(validated_model)
+                else:
+                    # Model couldn't be resolved or validated - move to not_found
+                    additional_not_found.append({
+                        'name': validated_model['name'],
+                        'folder': validated_model.get('folder'),
+                        'directory': validated_model.get('directory'),
+                        'reason': 'URL validation failed and HF search found nothing'
+                    })
+
+            all_ready_to_download = validated_models
+            not_found_models.extend(additional_not_found)
 
         # Update progress: complete
         scan_progress[scan_id]['status'] = 'complete'
