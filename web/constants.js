@@ -18,7 +18,10 @@ export const COLORS = {
     TEXT_LIGHT: '#ddd',
     TEXT_MEDIUM: '#999',
     PROGRESS_GREEN: '#6c9',
-    SHADOW: 'rgba(0,0,0,0.5)'
+    SHADOW: 'rgba(0,0,0,0.5)',
+    SUGGESTION_BG: '#2f2a3b',
+    SUGGESTION_BORDER: '#7c5dff',
+    SUGGESTION_ACCENT: '#c2b2ff'
 };
 
 export const STYLES = {

@@ -723,7 +723,9 @@ class MissingModelsDialog extends ComfyDialog {
     }
 
     createModelCard(model, index) {
-        const hasUrl = model.url && model.url.trim() !== '';
+        const suggestions = Array.isArray(model.search_suggestions) ? model.search_suggestions : [];
+        const hasSuggestionMatches = suggestions.length > 0 && model.has_exact_hf_match !== true;
+        let hasUrl = Boolean(model.url && model.url.trim() !== '');
 
         const progressBar = $el("div.progress-bar", {
             style: {
@@ -760,15 +762,15 @@ class MissingModelsDialog extends ComfyDialog {
             }
         });
 
-        const needsFolderSelection = model.needs_folder_selection === true;
-        const canDownload = hasUrl && !needsFolderSelection;
+        let needsFolderSelection = model.needs_folder_selection === true;
+        let canDownload = hasUrl && !needsFolderSelection;
 
-        const downloadButton = createStyledButton(hasUrl ? "Download" : "No URL", {
+        const downloadButton = createStyledButton(hasUrl ? "Download" : (hasSuggestionMatches ? "Select Match" : "No URL"), {
             color: canDownload ? COLORS.PRIMARY_BLUE : COLORS.DARK_GRAY,
             hoverColor: COLORS.PRIMARY_BLUE_HOVER,
             activeColor: COLORS.PRIMARY_BLUE_ACTIVE,
             onClick: async () => {
-                if (hasUrl) {
+                if (model.url && model.url.trim() !== '') {
                     await this.downloadModel(model, progressBar, statusText, downloadButton);
                 }
             },
@@ -780,16 +782,26 @@ class MissingModelsDialog extends ComfyDialog {
                 opacity: canDownload ? '1' : '0.6'
             }
         });
-        downloadButton.disabled = !canDownload;
+
+        const updateDownloadButtonState = () => {
+            hasUrl = Boolean(model.url && model.url.trim() !== '');
+            canDownload = hasUrl && !needsFolderSelection;
+            downloadButton.disabled = !canDownload;
+            downloadButton.textContent = hasUrl ? "Download" : (hasSuggestionMatches ? "Select Match" : "No URL");
+            downloadButton.style.cursor = canDownload ? 'pointer' : 'not-allowed';
+            downloadButton.style.backgroundColor = canDownload ? COLORS.PRIMARY_BLUE : COLORS.DARK_GRAY;
+            downloadButton.style.opacity = canDownload ? '1' : '0.6';
+        };
+        updateDownloadButtonState();
 
         const card = $el("div.model-card", {
             style: {
-                backgroundColor: '#333',
+                backgroundColor: hasSuggestionMatches ? COLORS.SUGGESTION_BG : '#333',
                 padding: '16px',
                 marginBottom: '12px',
                 borderRadius: '6px',
-                border: '1px solid #444',
-                boxShadow: '0 2px 8px rgba(0, 0, 0, 0.3)'
+                border: hasSuggestionMatches ? `1px solid ${COLORS.SUGGESTION_BORDER}` : '1px solid #444',
+                boxShadow: hasSuggestionMatches ? '0 2px 8px rgba(124, 93, 255, 0.3)' : '0 2px 8px rgba(0, 0, 0, 0.3)'
             }
         }, [
             $el("div", {
@@ -814,6 +826,16 @@ class MissingModelsDialog extends ComfyDialog {
                             letterSpacing: '0.2px'
                         }
                     }),
+                    hasSuggestionMatches ? $el("div", {
+                        textContent: "No exact HuggingFace match. Choose one of the suggested files below.",
+                        style: {
+                            fontSize: '12px',
+                            color: COLORS.SUGGESTION_ACCENT,
+                            marginBottom: '6px',
+                            lineHeight: '1.5',
+                            fontWeight: '500'
+                        }
+                    }) : null,
                     $el("div", {
                         textContent: `Directory: ${model.directory || model.folder}`,
                         style: {
@@ -824,26 +846,28 @@ class MissingModelsDialog extends ComfyDialog {
                             fontWeight: '400'
                         }
                     }),
-                    hasUrl ? (model._urlDisplay = $el("div", {
-                        textContent: `URL: ${this.truncateUrl(model.url)}`,
-                        title: model.url,
-                        style: {
-                            fontSize: '11px',
-                            color: COLORS.MEDIUM_GRAY,
-                            fontFamily: 'monospace',
-                            lineHeight: '1.5',
-                            fontWeight: '400'
+                    (() => {
+                        const urlDisplay = $el("div", {
+                            style: {
+                                fontSize: '11px',
+                                fontFamily: 'monospace',
+                                lineHeight: '1.5',
+                                fontWeight: '400'
+                            }
+                        });
+                        model._urlDisplay = urlDisplay;
+                        this.updateUrlDisplay(model, urlDisplay, hasSuggestionMatches);
+                        return urlDisplay;
+                    })(),
+                    hasSuggestionMatches ? this.createSuggestionSelector({
+                        model,
+                        suggestions,
+                        onChange: () => {
+                            this.updateUrlDisplay(model, model._urlDisplay, hasSuggestionMatches);
+                            updateDownloadButtonState();
+                            this.updateDownloadAllButtonState();
                         }
-                    })) : $el("div", {
-                        textContent: "URL: Not available - manual download required",
-                        style: {
-                            fontSize: '11px',
-                            color: '#c44',
-                            fontStyle: 'italic',
-                            lineHeight: '1.5',
-                            fontWeight: '400'
-                        }
-                    }),
+                    }) : null,
                     // Folder selector for models needing manual selection
                     needsFolderSelection ? $el("div", {
                         style: {
@@ -882,13 +906,9 @@ class MissingModelsDialog extends ComfyDialog {
                                     model.folder = selectedFolder;
                                     model.directory = selectedFolder;
                                     model.needs_folder_selection = false;
-
-                                    // Re-enable download button
-                                    downloadButton.disabled = false;
-                                    downloadButton.style.backgroundColor = COLORS.PRIMARY_BLUE;
-                                    downloadButton.style.opacity = '1';
-                                    downloadButton.style.cursor = 'pointer';
-
+                                    needsFolderSelection = false;
+                                    updateDownloadButtonState();
+                                    this.updateDownloadAllButtonState();
                                     console.log(`[Missing Models] Selected folder '${selectedFolder}' for ${model.name}`);
                                 }
                             }
@@ -925,8 +945,135 @@ class MissingModelsDialog extends ComfyDialog {
 
 
     truncateUrl(url, maxLength = 60) {
+        if (!url) return '';
         if (url.length <= maxLength) return url;
-        return url.substring(0, maxLength - 3) + '...';
+        const half = Math.floor((maxLength - 3) / 2);
+        return `${url.slice(0, half)}...${url.slice(-half)}`;
+    }
+
+    updateUrlDisplay(model, element, hasSuggestions = false) {
+        if (!element) {
+            return;
+        }
+
+        if (model.url && model.url.trim() !== '') {
+            element.textContent = `URL: ${this.truncateUrl(model.url)}`;
+            element.title = model.url;
+            element.style.color = COLORS.MEDIUM_GRAY;
+            element.style.fontStyle = 'normal';
+        } else if (hasSuggestions) {
+            element.textContent = 'URL: Select a suggested match to enable download';
+            element.title = '';
+            element.style.color = COLORS.SUGGESTION_ACCENT;
+            element.style.fontStyle = 'italic';
+        } else {
+            element.textContent = 'URL: Not available - manual download required';
+            element.title = '';
+            element.style.color = '#c44';
+            element.style.fontStyle = 'italic';
+        }
+    }
+
+    createSuggestionSelector({ model, suggestions, onChange }) {
+        const container = $el("div", {
+            style: {
+                marginTop: '10px',
+                marginBottom: '6px',
+                padding: '10px',
+                backgroundColor: '#272033',
+                borderRadius: '4px',
+                border: `1px solid ${COLORS.SUGGESTION_BORDER}`
+            }
+        });
+
+        const label = $el("label", {
+            textContent: "Top matches (closest first):",
+            style: {
+                fontSize: '12px',
+                color: COLORS.SUGGESTION_ACCENT,
+                display: 'block',
+                marginBottom: '6px',
+                fontWeight: '600'
+            }
+        });
+
+        const select = $el("select", {
+            style: {
+                width: '100%',
+                padding: '8px',
+                backgroundColor: '#3a3450',
+                color: '#fff',
+                border: `1px solid ${COLORS.SUGGESTION_BORDER}`,
+                borderRadius: '4px',
+                fontSize: '13px',
+                cursor: 'pointer'
+            }
+        });
+
+        const formatLabel = (suggestion, idx) => {
+            const score = suggestion.score ? `${Math.round(suggestion.score * 100)}%` : '—';
+            const repo = suggestion.repo_id || 'unknown repo';
+            const filename = suggestion.actual_filename || suggestion.filename;
+            return `${idx + 1}. ${filename} (${repo}, ${score})`;
+        };
+
+        select.appendChild($el("option", {
+            value: '',
+            textContent: '-- Select a suggested match --'
+        }));
+
+        suggestions.forEach((suggestion, idx) => {
+            select.appendChild($el("option", {
+                value: String(idx),
+                textContent: formatLabel(suggestion, idx)
+            }));
+        });
+
+        const applySelection = (selectedIndex) => {
+            if (selectedIndex === -1) {
+                model.selected_suggestion_index = undefined;
+                model.url = null;
+                model.expected_filename = null;
+                model.actual_filename = null;
+                model.url_source = null;
+            } else {
+                const suggestion = suggestions[selectedIndex];
+                model.selected_suggestion_index = selectedIndex;
+                model.url = suggestion.download_url;
+                model.expected_filename = suggestion.expected_filename || suggestion.actual_filename;
+                model.actual_filename = suggestion.actual_filename;
+                model.url_source = 'hf_suggestion';
+                model.has_exact_hf_match = false;
+            }
+            if (typeof onChange === 'function') {
+                onChange();
+            }
+        };
+
+        select.addEventListener('change', (event) => {
+            const value = event.target.value;
+            const selectedIndex = value === '' ? -1 : parseInt(value, 10);
+            applySelection(Number.isNaN(selectedIndex) ? -1 : selectedIndex);
+        });
+
+        let defaultIndex = typeof model.selected_suggestion_index === 'number'
+            ? model.selected_suggestion_index
+            : -1;
+        if (defaultIndex < 0 && model.url) {
+            defaultIndex = suggestions.findIndex((s) => s.download_url === model.url);
+        }
+        if (defaultIndex >= 0 && defaultIndex < suggestions.length) {
+            select.value = String(defaultIndex);
+            if (model.selected_suggestion_index !== defaultIndex) {
+                model.selected_suggestion_index = defaultIndex;
+            }
+        } else {
+            select.value = '';
+        }
+
+        container.appendChild(label);
+        container.appendChild(select);
+        return container;
     }
 
     async downloadModel(model, progressBar, statusText, downloadButton) {

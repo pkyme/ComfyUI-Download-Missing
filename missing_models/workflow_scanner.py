@@ -94,11 +94,14 @@ class WorkflowScanner:
             scan_id, progress=66, stage="resolving", message="Resolving model URLs..."
         )
 
-        resolved_models, not_found_models = await self.resolve_missing_model_urls(
-            workflow, unique_no_url
-        )
+        (
+            resolved_models,
+            suggestion_models,
+            not_found_models,
+        ) = await self.resolve_missing_model_urls(workflow, unique_no_url)
 
         all_ready_to_download = unique_missing + resolved_models
+        pending_suggestions: List[MissingModel] = suggestion_models.copy()
 
         if all_ready_to_download:
             self._update_scan_progress(
@@ -106,11 +109,16 @@ class WorkflowScanner:
             )
             validated_models: List[MissingModel] = []
             additional_not_found: List[MissingModel] = []
+            additional_suggestions: List[MissingModel] = []
 
             for model in all_ready_to_download:
                 validated_model = await self.validate_and_resolve_model(model)
                 if validated_model.url and getattr(validated_model, "url_valid", True):
                     validated_models.append(validated_model)
+                elif getattr(validated_model, "search_suggestions", []):
+                    # Surface fuzzy matches in the UI instead of marking as not found.
+                    validated_model.has_exact_hf_match = False
+                    additional_suggestions.append(validated_model)
                 else:
                     additional_not_found.append(
                         MissingModel(
@@ -126,7 +134,10 @@ class WorkflowScanner:
                     )
 
             all_ready_to_download = validated_models
+            pending_suggestions.extend(additional_suggestions)
             not_found_models.extend(additional_not_found)
+
+        final_missing_models = all_ready_to_download + pending_suggestions
 
         self.scan_progress[scan_id].status = "complete"
         self._update_scan_progress(
@@ -134,7 +145,7 @@ class WorkflowScanner:
         )
 
         return ScanResult(
-            missing_models=all_ready_to_download,
+            missing_models=final_missing_models,
             not_found_models=not_found_models,
             corrected_models=unique_corrected,
         )
@@ -159,19 +170,33 @@ class WorkflowScanner:
         """Search HuggingFace and update model URL if found."""
         filename = os.path.basename(model.name)
         results = await self.hf_search.search_popular_repos(filename)
+        exact_matches = results.get("exact_matches", [])
+        fuzzy_matches = results.get("fuzzy_matches", [])
 
-        if results:
-            first_result = results[0]
+        if exact_matches:
+            first_result = exact_matches[0]
             model.url = first_result["download_url"]
             model.url_source = "hf_auto_search"
             model.expected_filename = first_result.get("expected_filename", filename)
             model.actual_filename = first_result.get("actual_filename", filename)
+            model.has_exact_hf_match = True
             setattr(model, "url_valid", True)
             logging.info(
                 "[Download Missing Models] Auto-found on HF: %s", model.url
             )
+        elif fuzzy_matches:
+            model.url = None
+            model.search_suggestions = fuzzy_matches
+            model.has_exact_hf_match = False
+            setattr(model, "url_valid", False)
+            logging.info(
+                "[Download Missing Models] No exact HF match for %s. Providing %d suggestion(s)",
+                model.name,
+                len(fuzzy_matches),
+            )
         else:
             model.url = None
+            model.has_exact_hf_match = False
             setattr(model, "url_valid", False)
             model.metadata["not_found"] = True
             logging.info(
@@ -182,10 +207,14 @@ class WorkflowScanner:
 
     async def resolve_missing_model_urls(
         self, workflow: dict, missing_no_url: List[MissingModel]
-    ) -> Tuple[List[MissingModel], List[MissingModel]]:
-        """Resolve URLs for models using notes and HuggingFace search."""
+    ) -> Tuple[List[MissingModel], List[MissingModel], List[MissingModel]]:
+        """Resolve URLs for models using notes and HuggingFace search.
+
+        Returns resolved models with URLs, models that only have fuzzy suggestions,
+        and models that still have no leads.
+        """
         if not missing_no_url:
-            return [], []
+            return [], [], []
 
         logging.info(
             "[Download Missing Models] Attempting to resolve URLs for %d models",
@@ -216,9 +245,11 @@ class WorkflowScanner:
             try:
                 model_filename = os.path.basename(model.name.replace("\\", "/"))
                 results = await self.hf_search.search_popular_repos(model_filename)
+                exact_matches = results.get("exact_matches", [])
+                fuzzy_matches = results.get("fuzzy_matches", [])
 
-                if results:
-                    result = results[0]
+                if exact_matches:
+                    result = exact_matches[0]
                     model.url = result["download_url"]
                     model.url_source = "hf_search"
                     model.expected_filename = result.get(
@@ -227,10 +258,9 @@ class WorkflowScanner:
                     model.actual_filename = result.get(
                         "actual_filename", model_filename
                     )
+                    model.has_exact_hf_match = True
                     repo_id = result.get("repo_id", "unknown")
-                    match_type = (
-                        "exact" if result.get("score", 1.0) == 1.0 else "flexible"
-                    )
+                    match_type = result.get("match_type", "exact")
                     actual = result.get("actual_filename", model_filename)
                     expected = result.get("expected_filename", model_filename)
                     if actual != expected:
@@ -248,6 +278,14 @@ class WorkflowScanner:
                             repo_id,
                             match_type,
                         )
+                elif fuzzy_matches:
+                    model.search_suggestions = fuzzy_matches
+                    model.has_exact_hf_match = False
+                    logging.info(
+                        "[Download Missing Models] ✚ No exact match for %s but %d suggestion(s) available",
+                        model_filename,
+                        len(fuzzy_matches),
+                    )
                 else:
                     logging.info(
                         "[Download Missing Models] ✗ Not found: %s", model_filename
@@ -260,13 +298,20 @@ class WorkflowScanner:
                 )
 
         resolved = [m for m in missing_no_url if m.url]
-        not_found = [m for m in missing_no_url if not m.url]
+        suggestions = [
+            m for m in missing_no_url if not m.url and getattr(m, "search_suggestions", [])
+        ]
+        not_found = [
+            m for m in missing_no_url
+            if not m.url and not getattr(m, "search_suggestions", [])
+        ]
         logging.info(
-            "[Download Missing Models] Resolution complete: %d resolved, %d not found",
+            "[Download Missing Models] Resolution complete: %d resolved, %d with suggestions, %d not found",
             len(resolved),
+            len(suggestions),
             len(not_found),
         )
-        return resolved, not_found
+        return resolved, suggestions, not_found
 
     async def validate_url(self, url: str) -> bool:
         """Validate a URL by sending a HEAD request."""

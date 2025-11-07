@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+from difflib import SequenceMatcher
 from typing import Dict, List, Optional, Tuple
 
 from huggingface_hub import HfApi
@@ -22,20 +23,28 @@ POPULAR_HF_USERS = [
 class HuggingFaceSearch:
     """Encapsulates repo listing, caching, and filename matching."""
 
+    MIN_FUZZY_SCORE = 0.55
+    MAX_FUZZY_RESULTS = 10
+
     def __init__(self, cache_file: str):
         self.cache_file = cache_file
         self.cache_data: Dict[str, Dict] = self._load_cache()
         self.repo_files_cache: Dict[str, List[str]] = {}
 
-    async def search_popular_repos(self, filename: str) -> List[dict]:
-        """Search through popular repos for a filename."""
+    async def search_popular_repos(self, filename: str) -> Dict[str, List[dict]]:
+        """Search through popular repos for a filename.
+
+        Returns a dict with exact matches (if any) or the top fuzzy matches when no
+        exact hits were found. The caller can decide how to use fuzzy results.
+        """
         try:
             search_filename = os.path.basename(filename)
             logging.info(
                 "[Download Missing Models] Searching for: %s", search_filename
             )
 
-            results: List[dict] = []
+            exact_matches: List[dict] = []
+            fuzzy_candidates: List[dict] = []
             api = HfApi()
 
             for entry in POPULAR_HF_USERS:
@@ -49,10 +58,11 @@ class HuggingFaceSearch:
                         file_list = await self._fetch_repo_files_with_cache(
                             api, repo_id, repo_last_modified
                         )
-                        matches = self._match_files_in_repo(
+                        repo_matches = self._match_files_in_repo(
                             file_list, search_filename, repo_id
                         )
-                        results.extend(matches)
+                        exact_matches.extend(repo_matches["exact"])
+                        fuzzy_candidates.extend(repo_matches["fuzzy"])
                 except Exception as exc:
                     logging.warning(
                         "[Download Missing Models] Error processing %s: %s",
@@ -60,12 +70,30 @@ class HuggingFaceSearch:
                         exc,
                     )
 
-            return results
+            if exact_matches:
+                logging.info(
+                    "[Download Missing Models] ✓ Found %d exact match(es)",
+                    len(exact_matches),
+                )
+                return {"exact_matches": exact_matches, "fuzzy_matches": []}
+
+            fuzzy_candidates.sort(key=lambda item: item["score"], reverse=True)
+            top_fuzzy = fuzzy_candidates[: self.MAX_FUZZY_RESULTS]
+            if top_fuzzy:
+                logging.info(
+                    "[Download Missing Models] No exact matches. Returning %d fuzzy suggestion(s)",
+                    len(top_fuzzy),
+                )
+            else:
+                logging.info(
+                    "[Download Missing Models] No similar files found in cached repos"
+                )
+            return {"exact_matches": [], "fuzzy_matches": top_fuzzy}
         except Exception as exc:
             logging.error(
                 "[Download Missing Models] Error searching popular repos: %s", exc
             )
-            return []
+            return {"exact_matches": [], "fuzzy_matches": []}
 
     async def search_huggingface_api(
         self, model_name: str, folder_type: Optional[str] = None
@@ -77,10 +105,20 @@ class HuggingFaceSearch:
                 "[Download Missing Models] Searching HuggingFace for: %s", filename
             )
             results = await self.search_popular_repos(filename)
-            if results:
+            match_count = (
+                len(results["exact_matches"])
+                if results["exact_matches"]
+                else len(results["fuzzy_matches"])
+            )
+            if results["exact_matches"]:
                 logging.info(
-                    "[Download Missing Models] ✓ Found %d matches in popular repos",
-                    len(results),
+                    "[Download Missing Models] ✓ Found %d exact match(es) in popular repos",
+                    match_count,
+                )
+            elif results["fuzzy_matches"]:
+                logging.info(
+                    "[Download Missing Models] Returning %d fuzzy suggestion(s)",
+                    match_count,
                 )
             else:
                 logging.info(
@@ -91,7 +129,7 @@ class HuggingFaceSearch:
             logging.error(
                 "[Download Missing Models] Error searching HuggingFace: %s", exc
             )
-            return []
+            return {"exact_matches": [], "fuzzy_matches": []}
 
     async def list_user_repos(self, username: str) -> List[Tuple[str, Optional[str]]]:
         """List repos for a HuggingFace user."""
@@ -162,7 +200,12 @@ class HuggingFaceSearch:
         return file_list
 
     def _create_match_result(
-        self, repo_id: str, file_path: str, search_filename: str, score: float
+        self,
+        repo_id: str,
+        file_path: str,
+        search_filename: str,
+        score: float,
+        match_type: str,
     ) -> dict:
         file_basename = os.path.basename(file_path)
         return {
@@ -174,36 +217,66 @@ class HuggingFaceSearch:
             "downloads": 0,
             "likes": 0,
             "score": score,
+            "match_type": match_type,
             "download_url": f"https://huggingface.co/{repo_id}/resolve/main/{file_path}",
             "source": "popular_repos",
         }
 
     def _match_files_in_repo(
         self, file_list: List[str], search_filename: str, repo_id: str
-    ) -> List[dict]:
-        results: List[dict] = []
+    ) -> Dict[str, List[dict]]:
+        exact_matches: List[dict] = []
+        fuzzy_candidates: List[dict] = []
+        target_lower = search_filename.lower()
+
         for file_path in file_list:
             file_basename = os.path.basename(file_path)
-            if file_basename.lower() == search_filename.lower():
-                results.append(
-                    self._create_match_result(repo_id, file_path, search_filename, 1.0)
+            if file_basename.lower() == target_lower:
+                exact_matches.append(
+                    self._create_match_result(
+                        repo_id, file_path, search_filename, 1.0, "exact"
+                    )
                 )
 
-        if not results:
-            for file_path in file_list:
-                file_basename = os.path.basename(file_path)
-                if self._flexible_filename_match(file_basename, search_filename):
-                    results.append(
-                        self._create_match_result(repo_id, file_path, search_filename, 0.9)
-                    )
+        if exact_matches:
+            return {"exact": exact_matches, "fuzzy": []}
 
-        return results
+        for file_path in file_list:
+            file_basename = os.path.basename(file_path)
+            similarity = self._compute_similarity(file_basename, search_filename)
+            if similarity >= self.MIN_FUZZY_SCORE:
+                fuzzy_candidates.append(
+                    self._create_match_result(
+                        repo_id,
+                        file_path,
+                        search_filename,
+                        round(similarity, 4),
+                        "fuzzy",
+                    )
+                )
+
+        return {"exact": [], "fuzzy": fuzzy_candidates}
 
     @staticmethod
-    def _flexible_filename_match(filename1: str, filename2: str) -> bool:
-        normalized1 = filename1.replace("-", "").replace("_", "").replace(" ", "").lower()
-        normalized2 = filename2.replace("-", "").replace("_", "").replace(" ", "").lower()
-        return normalized1 == normalized2
+    def _strip_delimiters(value: str) -> str:
+        return value.replace("-", "").replace("_", "").replace(" ", "")
+
+    def _compute_similarity(self, filename1: str, filename2: str) -> float:
+        normalized1 = filename1.lower()
+        normalized2 = filename2.lower()
+        base_ratio = SequenceMatcher(None, normalized1, normalized2).ratio()
+
+        simple1 = self._strip_delimiters(normalized1)
+        simple2 = self._strip_delimiters(normalized2)
+        simple_ratio = SequenceMatcher(None, simple1, simple2).ratio()
+
+        if simple1 == simple2:
+            # Underscore/dash only differences should almost count as a match.
+            simple_ratio = max(simple_ratio, 0.95)
+
+        prefix_bonus = 0.05 if normalized1.startswith(normalized2) or normalized2.startswith(normalized1) else 0
+        combined = max(base_ratio, simple_ratio) + prefix_bonus
+        return min(1.0, combined)
 
     def _load_cache(self) -> Dict[str, Dict]:
         try:

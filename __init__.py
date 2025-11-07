@@ -272,7 +272,14 @@ class MissingModelsExtension:
             )
 
         results = await self.hf_search.search_huggingface_api(model_name, folder_type)
-        return self._create_response(data={"results": results, "count": len(results)})
+        match_count = (
+            len(results.get("exact_matches", []))
+            if results.get("exact_matches")
+            else len(results.get("fuzzy_matches", []))
+        )
+        return self._create_response(
+            data={"results": results, "count": match_count}
+        )
 
     async def handle_get_available_folders(self, _request):
         """Get list of available model folders from ComfyUI."""

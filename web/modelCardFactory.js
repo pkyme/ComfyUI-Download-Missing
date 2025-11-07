@@ -22,6 +22,11 @@ export function createModelCardBase(config) {
             border: '1px solid #844',
             opacity: '0.8'
         },
+        suggested: {
+            backgroundColor: COLORS.SUGGESTION_BG,
+            border: `1px solid ${COLORS.SUGGESTION_BORDER}`,
+            boxShadow: '0 2px 8px rgba(124, 93, 255, 0.25)'
+        },
         corrected: {
             backgroundColor: '#1a3a1a',
             border: '1px solid #2d5a2d',

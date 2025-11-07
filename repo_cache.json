@@ -2498,7 +2498,7 @@
     ]
   },
   "lightx2v/Wan2.2-Lightning": {
-    "last_modified": "2025-09-28T15:58:10+00:00",
+    "last_modified": "2025-11-07T16:03:51+00:00",
     "files": [
       ".gitattributes",
       "README.md",
@@ -2520,7 +2520,10 @@
       "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1/README.md",
       "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1/Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1-NativeComfy.json",
       "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1/high_noise_model.safetensors",
-      "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1/low_noise_model.safetensors"
+      "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1/low_noise_model.safetensors",
+      "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V2.0/config.json",
+      "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V2.0/high_noise_model.safetensors",
+      "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V2.0/low_noise_model.safetensors"
     ]
   },
   "lightx2v/Wan2.1-I2V-14B-480P-StepDistill-CfgDistill-Lightx2v": {

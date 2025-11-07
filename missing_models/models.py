@@ -45,12 +45,16 @@ class MissingModel:
     needs_folder_selection: bool = False
     metadata: Dict[str, Any] = field(default_factory=dict)
     related_usages: List[Dict[str, Any]] = field(default_factory=list)
+    has_exact_hf_match: Optional[bool] = None
+    search_suggestions: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_payload(self) -> Dict[str, Any]:
         payload = asdict(self)
         # Avoid sending empty metadata to clients.
         if not self.metadata:
             payload.pop("metadata", None)
+        if not self.search_suggestions:
+            payload.pop("search_suggestions", None)
         return payload
 
 
