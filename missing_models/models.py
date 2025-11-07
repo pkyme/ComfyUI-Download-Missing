@@ -44,6 +44,7 @@ class MissingModel:
     original_url: Optional[str] = None
     needs_folder_selection: bool = False
     metadata: Dict[str, Any] = field(default_factory=dict)
+    related_usages: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_payload(self) -> Dict[str, Any]:
         payload = asdict(self)

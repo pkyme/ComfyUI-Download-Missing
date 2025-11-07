@@ -460,13 +460,16 @@ class WorkflowScanner:
             name = (model.name or "").replace("\\", "/").lower()
             return name, folder
 
-        seen_missing = set()
+        seen_missing: Dict[Tuple[str, str], MissingModel] = {}
         unique_missing: List[MissingModel] = []
         for model in missing_models:
             key = _missing_key(model)
             if key not in seen_missing:
-                seen_missing.add(key)
+                model.related_usages = [self._usage_metadata(model)]
+                seen_missing[key] = model
                 unique_missing.append(model)
+            else:
+                seen_missing[key].related_usages.append(self._usage_metadata(model))
 
         seen_corrected = set()
         unique_corrected: List[Correction] = []
@@ -481,13 +484,16 @@ class WorkflowScanner:
                 seen_corrected.add(key)
                 unique_corrected.append(correction)
 
-        seen_no_url = set()
+        seen_no_url: Dict[Tuple[str, str], MissingModel] = {}
         unique_no_url: List[MissingModel] = []
         for model in missing_no_url:
             key = _missing_key(model)
             if key not in seen_no_url:
-                seen_no_url.add(key)
+                model.related_usages = [self._usage_metadata(model)]
+                seen_no_url[key] = model
                 unique_no_url.append(model)
+            else:
+                seen_no_url[key].related_usages.append(self._usage_metadata(model))
 
         return unique_missing, unique_corrected, unique_no_url
 
@@ -502,6 +508,16 @@ class WorkflowScanner:
             if model_name in model_urls:
                 return model_urls[model_name].get("url")
         return None
+
+    @staticmethod
+    def _usage_metadata(model: MissingModel) -> Dict[str, Any]:
+        return {
+            "node_id": getattr(model, "node_id", None),
+            "node_type": getattr(model, "node_type", None),
+            "correction_type": getattr(model, "correction_type", None),
+            "widget_index": getattr(model, "widget_index", None),
+            "property_index": getattr(model, "property_index", None),
+        }
 
     def detect_model_file(self, value) -> bool:
         if not isinstance(value, str):

@@ -972,7 +972,24 @@ class MissingModelsDialog extends ComfyDialog {
             // Parse response and apply correction if provided
             const result = await response.json();
             if (result.correction) {
-                this.applyCorrectionsToGraph([result.correction]);
+                const usageList = Array.isArray(model.related_usages) && model.related_usages.length > 0
+                    ? model.related_usages
+                    : [this._buildUsageMetadataFromModel(model)];
+
+                const corrections = usageList
+                    .filter(usage => usage && usage.node_id !== undefined && usage.node_id !== null)
+                    .map(usage => ({
+                        ...result.correction,
+                        node_id: usage.node_id,
+                        node_type: usage.node_type,
+                        correction_type: usage.correction_type,
+                        widget_index: usage.widget_index,
+                        property_index: usage.property_index
+                    }));
+
+                if (corrections.length > 0) {
+                    this.applyCorrectionsToGraph(corrections);
+                }
             }
 
             // Start polling for progress
@@ -1150,7 +1167,18 @@ class MissingModelsDialog extends ComfyDialog {
             this.element.style.display = "none";
         }, 300);
 
+        // Clean up drag listeners
+        if (this.modelsListElement && this.mouseDownHandler) {
+            this.modelsListElement.removeEventListener('mousedown', this.mouseDownHandler);
+        }
+        if (this.mouseUpHandler) {
+            document.removeEventListener('mouseup', this.mouseUpHandler);
+            this.mouseUpHandler = null;
+        }
+
+        // Reset freeze state
         this.uiFrozen = false;
+        this.isMouseDown = false;
         this.pendingProgressUpdates.clear();
         this.domUpdateQueue = [];
 
@@ -1163,6 +1191,16 @@ class MissingModelsDialog extends ComfyDialog {
             }).catch(err => console.error("Error cancelling download:", err));
         });
         this.downloadingModels.clear();
+    }
+
+    _buildUsageMetadataFromModel(model) {
+        return {
+            node_id: model.node_id,
+            node_type: model.node_type,
+            correction_type: model.correction_type,
+            widget_index: model.widget_index,
+            property_index: model.property_index
+        };
     }
 }
 
