@@ -3,305 +3,16 @@ import { api } from "../../scripts/api.js";
 import { $el, ComfyDialog } from "../../scripts/ui.js";
 import { ComfyButton } from "../../scripts/ui/components/button.js";
 import { ComfyButtonGroup } from "../../scripts/ui/components/buttonGroup.js";
-
-// Color constants
-const COLORS = {
-    PRIMARY_GREEN: '#28a745',
-    PRIMARY_GREEN_HOVER: '#218838',
-    PRIMARY_GREEN_ACTIVE: '#1e7e34',
-    PRIMARY_BLUE: '#0066cc',
-    PRIMARY_BLUE_HOVER: '#0052a3',
-    PRIMARY_BLUE_ACTIVE: '#004080',
-    ERROR_RED: '#f44',
-    WARNING_ORANGE: '#fa4',
-    DARK_BG: '#1a1a1a',
-    BORDER_GRAY: '#444',
-    DARK_GRAY: '#444',
-    MEDIUM_GRAY: '#666',
-    LIGHT_GRAY: '#aaa',
-    TEXT_WHITE: '#fff',
-    TEXT_LIGHT: '#ddd',
-    TEXT_MEDIUM: '#999',
-    PROGRESS_GREEN: '#6c9',
-    SHADOW: 'rgba(0,0,0,0.5)'
-};
-
-// Common style objects
-const STYLES = {
-    heading: {
-        fontWeight: '600',
-        color: COLORS.TEXT_WHITE,
-        fontSize: '15px',
-        marginBottom: '8px',
-        wordBreak: 'break-word',
-        lineHeight: '1.4',
-        letterSpacing: '0.2px'
-    },
-    subheading: {
-        fontSize: '13px',
-        color: COLORS.LIGHT_GRAY,
-        marginBottom: '12px',
-        wordBreak: 'break-word',
-        lineHeight: '1.5'
-    },
-    button: {
-        padding: '8px 16px',
-        border: 'none',
-        borderRadius: '4px',
-        cursor: 'pointer',
-        fontSize: '14px',
-        fontWeight: '500',
-        transition: 'all 0.2s ease',
-        display: 'flex',
-        alignItems: 'center',
-        gap: '6px'
-    }
-};
-
-// Scan progress configuration
-const SCAN_PROGRESS = {
-    NODES_WEIGHT: 33,           // Progress percentage for node scanning
-    METADATA_WEIGHT: 33,        // Progress percentage for metadata checking
-    URL_RESOLUTION_WEIGHT: 34,  // Progress percentage for URL resolution
-    POLL_INTERVAL: 500,         // Polling interval in milliseconds
-    DOWNLOAD_DELAY: 1000        // Delay before starting downloads
-};
-
-// Status type constants
-const STATUS_TYPES = {
-    INFO: 'info',
-    SUCCESS: 'success',
-    WARNING: 'warning',
-    ERROR: 'error'
-};
-
-// Status color mapping
-const STATUS_COLORS = {
-    [STATUS_TYPES.INFO]: COLORS.PROGRESS_GREEN,
-    [STATUS_TYPES.SUCCESS]: COLORS.PROGRESS_GREEN,
-    [STATUS_TYPES.WARNING]: COLORS.WARNING_ORANGE,
-    [STATUS_TYPES.ERROR]: COLORS.ERROR_RED
-};
-
-// Dialog dimensions
-const DIALOG_DIMENSIONS = {
-    WIDTH: '900px',
-    MAX_HEIGHT: '80vh',
-    HEADER_FOOTER_HEIGHT: 250
-};
-
-/**
- * Create a styled button with hover effects
- * @param {string} text - Button text
- * @param {object} options - Button configuration
- * @param {string} options.color - Base background color
- * @param {string} options.hoverColor - Hover state color
- * @param {string} options.activeColor - Active state color
- * @param {function} options.onClick - Click handler
- * @param {object} options.extraStyles - Additional styles to merge
- * @returns {HTMLElement} Button element
- */
-function createStyledButton(text, options = {}) {
-    const {
-        color,
-        hoverColor,
-        activeColor,
-        onClick,
-        extraStyles = {}
-    } = options;
-
-    const button = $el("button", {
-        textContent: text,
-        style: {
-            ...STYLES.button,
-            backgroundColor: color,
-            color: COLORS.TEXT_WHITE,
-            ...extraStyles
-        }
-    });
-
-    // Mouse event handlers for hover effects
-    button.addEventListener('mouseenter', (e) => {
-        if (!e.currentTarget.disabled) {
-            e.currentTarget.style.backgroundColor = hoverColor;
-            e.currentTarget.style.transform = 'translateY(-1px)';
-            e.currentTarget.style.boxShadow = `0 4px 8px ${COLORS.SHADOW}`;
-        }
-    });
-
-    button.addEventListener('mouseleave', (e) => {
-        if (!e.currentTarget.disabled) {
-            e.currentTarget.style.backgroundColor = color;
-            e.currentTarget.style.transform = 'translateY(0)';
-            e.currentTarget.style.boxShadow = 'none';
-        }
-    });
-
-    button.addEventListener('mousedown', (e) => {
-        if (!e.currentTarget.disabled) {
-            e.currentTarget.style.backgroundColor = activeColor;
-            e.currentTarget.style.transform = 'translateY(0)';
-        }
-    });
-
-    button.addEventListener('mouseup', (e) => {
-        if (!e.currentTarget.disabled) {
-            e.currentTarget.style.backgroundColor = hoverColor;
-            e.currentTarget.style.transform = 'translateY(-1px)';
-        }
-    });
-
-    if (onClick) {
-        button.addEventListener('click', onClick);
-    }
-
-    return button;
-}
-
-/**
- * Poll an endpoint repeatedly until a stop condition is met
- * @param {string} url - Endpoint URL to poll
- * @param {function} onUpdate - Callback with response data: (data) => void
- * @param {function} shouldStop - Function to check if polling should stop: (data) => boolean
- * @param {number} interval - Polling interval in milliseconds (default: 100)
- * @param {function} onError - Optional error handler: (error) => void
- * @returns {function} Stop function to manually cancel polling
- */
-function pollEndpoint(url, onUpdate, shouldStop, interval = 100, onError = null) {
-    const pollInterval = setInterval(async () => {
-        try {
-            const response = await api.fetchApi(url);
-
-            if (!response.ok) {
-                clearInterval(pollInterval);
-                if (onError) {
-                    onError(new Error(`HTTP ${response.status}`));
-                }
-                return;
-            }
-
-            const data = await response.json();
-            onUpdate(data);
-
-            if (shouldStop(data)) {
-                clearInterval(pollInterval);
-            }
-        } catch (err) {
-            if (onError) {
-                onError(err);
-            } else {
-                console.error("[Polling Error]", err);
-            }
-        }
-    }, interval);
-
-    // Return stop function
-    return () => clearInterval(pollInterval);
-}
-
-/**
- * Create a model card with consistent structure
- * @param {object} config - Card configuration
- * @param {string} config.model - Model data
- * @param {string} config.type - Card type: 'downloadable', 'not_found', 'corrected'
- * @param {object} config.styling - Custom styling overrides
- * @param {array} config.infoItems - Additional info items to display
- * @param {HTMLElement} config.actionElement - Action button or indicator
- * @param {array} config.extraElements - Additional elements to append
- * @returns {HTMLElement} Card element
- */
-function createModelCardBase(config) {
-    const {
-        model,
-        type = 'downloadable',
-        styling = {},
-        infoItems = [],
-        actionElement = null,
-        extraElements = []
-    } = config;
-
-    // Type-specific default styling
-    const typeStyles = {
-        downloadable: {
-            backgroundColor: '#333',
-            border: '1px solid #444',
-            opacity: '1'
-        },
-        not_found: {
-            backgroundColor: '#3a2a2a',
-            border: '1px solid #844',
-            opacity: '0.8'
-        },
-        corrected: {
-            backgroundColor: '#1a3a1a',
-            border: '1px solid #2d5a2d',
-            boxShadow: '0 2px 6px rgba(40, 167, 69, 0.15)'
-        }
-    };
-
-    const cardStyle = {
-        padding: '16px',
-        marginBottom: '12px',
-        borderRadius: '6px',
-        boxShadow: '0 2px 8px rgba(0, 0, 0, 0.3)',
-        ...typeStyles[type],
-        ...styling
-    };
-
-    // Build info section
-    const infoSection = $el("div", {
-        style: { flex: '1', marginRight: '15px' }
-    }, [
-        // Model name
-        $el("div", {
-            textContent: model.name,
-            style: {
-                ...STYLES.heading,
-                fontSize: type === 'corrected' ? '14px' : '15px',
-                marginBottom: type === 'corrected' ? '6px' : '8px'
-            }
-        }),
-        // Info items
-        ...infoItems
-    ]);
-
-    // Main content structure
-    const contentChildren = type === 'corrected' ?
-        [
-            $el("div", {
-                textContent: "✓",
-                style: {
-                    color: COLORS.PRIMARY_GREEN,
-                    fontSize: '18px',
-                    fontWeight: 'bold',
-                    marginRight: '12px',
-                    lineHeight: '1.4'
-                }
-            }),
-            $el("div", { style: { flex: '1' } }, [
-                infoSection,
-                ...extraElements
-            ])
-        ] :
-        [
-            infoSection,
-            actionElement
-        ].filter(el => el !== null);
-
-    const mainContent = $el("div", {
-        style: {
-            display: 'flex',
-            justifyContent: type === 'corrected' ? 'flex-start' : 'space-between',
-            alignItems: 'flex-start'
-        }
-    }, contentChildren);
-
-    const card = $el(`div.${type === 'corrected' ? 'corrected-' : ''}model-card`, {
-        style: cardStyle
-    }, [mainContent, ...extraElements].filter(el => el !== null));
-
-    return card;
-}
+import {
+    COLORS,
+    STYLES,
+    SCAN_PROGRESS,
+    STATUS_TYPES,
+    STATUS_COLORS,
+    DIALOG_DIMENSIONS
+} from "./constants.js";
+import { createStyledButton, pollEndpoint } from "./uiHelpers.js";
+import { createModelCardBase } from "./modelCardFactory.js";
 
 /**
  * Dialog for displaying and downloading missing models
@@ -313,16 +24,16 @@ class MissingModelsDialog extends ComfyDialog {
         this.notFoundModels = [];
         this.correctedModels = [];
         this.downloadingModels = new Set();
+        this.pendingProgressUpdates = new Map();
+        this.uiFrozen = false;
+        this.isMouseDown = false;
+        this.domUpdateQueue = [];
         this.progressInterval = null;
         this.availableFolders = [];
 
-        // Scroll interaction tracking for preventing DOM updates during scrolling
-        this.isUserScrolling = false;
-        this.scrollTimeout = null;
-        this.scrollEventHandler = null;
+        // Scroll interaction tracking for preventing DOM updates during drag scrolling
         this.mouseDownHandler = null;
-        this.wheelHandler = null;
-        this.keyDownHandler = null;
+        this.mouseUpHandler = null;
 
         this.element = $el("div.comfy-modal", {
             id: 'missing-models-dialog',
@@ -407,37 +118,17 @@ class MissingModelsDialog extends ComfyDialog {
             })
         ]);
 
-        // Add event listeners to prevent DOM updates during scrolling
-        // Scroll event for debounce mechanism
-        this.scrollEventHandler = () => {
-            this.handleScrollStart();
-            this.handleScrollEnd();
-        };
-
-        // Mousedown event catches scrollbar clicks BEFORE scroll position changes
+        // Attach drag listeners to pause UI updates while scrollbar is held
         this.mouseDownHandler = () => {
-            this.handleScrollStart();
+            this.isMouseDown = true;
+            this.freezeUI();
         };
-
-        // Wheel event catches mouse wheel scrolling BEFORE scroll position changes
-        this.wheelHandler = () => {
-            this.handleScrollStart();
-        };
-
-        // Keydown event catches keyboard scrolling BEFORE scroll position changes
-        this.keyDownHandler = (e) => {
-            // Only capture keys that trigger scrolling
-            if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
-                 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(e.key)) {
-                this.handleScrollStart();
-            }
-        };
-
-        // Attach all event listeners
-        this.modelsListElement.addEventListener('scroll', this.scrollEventHandler);
         this.modelsListElement.addEventListener('mousedown', this.mouseDownHandler);
-        this.modelsListElement.addEventListener('wheel', this.wheelHandler);
-        this.modelsListElement.addEventListener('keydown', this.keyDownHandler);
+        this.mouseUpHandler = () => {
+            this.isMouseDown = false;
+            this.unfreezeUI();
+        };
+        document.addEventListener('mouseup', this.mouseUpHandler);
 
         this.downloadAllButton = createStyledButton("Download All", {
             color: COLORS.PRIMARY_GREEN,
@@ -496,22 +187,43 @@ class MissingModelsDialog extends ComfyDialog {
         ]);
     }
 
-    handleScrollStart() {
-        this.isUserScrolling = true;
-        if (this.scrollTimeout) {
-            clearTimeout(this.scrollTimeout);
-            this.scrollTimeout = null;
+    freezeUI() {
+        this.uiFrozen = true;
+    }
+
+    unfreezeUI() {
+        if (this.isMouseDown) {
+            return;
+        }
+        if (!this.uiFrozen) {
+            return;
+        }
+        this.uiFrozen = false;
+        this.flushPendingProgressUpdates();
+        this.flushDomUpdateQueue();
+    }
+
+    scheduleDomUpdate(callback) {
+        if (this.uiFrozen) {
+            this.domUpdateQueue.push(callback);
+        } else {
+            callback();
         }
     }
 
-    handleScrollEnd() {
-        // Use debouncing to detect when scrolling has stopped
-        if (this.scrollTimeout) {
-            clearTimeout(this.scrollTimeout);
+    flushDomUpdateQueue() {
+        if (this.uiFrozen || this.domUpdateQueue.length === 0) {
+            return;
         }
-        this.scrollTimeout = setTimeout(() => {
-            this.isUserScrolling = false;
-        }, 150); // 150ms debounce delay
+
+        const updates = this.domUpdateQueue.splice(0, this.domUpdateQueue.length);
+        for (const updateFn of updates) {
+            try {
+                updateFn();
+            } catch (err) {
+                console.error("[Missing Models] Deferred UI update failed:", err);
+            }
+        }
     }
 
     async loadAvailableFolders() {
@@ -688,177 +400,179 @@ class MissingModelsDialog extends ComfyDialog {
     }
 
     _updateDownloadAllButtonStateImmediate() {
-        // Check if there are any models ready to download (have URLs and not already completed)
-        const modelsReadyToDownload = this.missingModels.filter(m => {
-            const hasUrl = m.url && m.url.trim() !== '';
-            const notDownloading = !this.downloadingModels.has(m.name);
-            const notCompleted = !m._downloadButton || m._downloadButton.textContent !== "Completed";
-            return hasUrl && (notDownloading || notCompleted);
-        });
+        this.scheduleDomUpdate(() => {
+            const modelsReadyToDownload = this.missingModels.filter(m => {
+                const hasUrl = m.url && m.url.trim() !== '';
+                const notDownloading = !this.downloadingModels.has(m.name);
+                const notCompleted = !m._downloadButton || m._downloadButton.textContent !== "Completed";
+                return hasUrl && (notDownloading || notCompleted);
+            });
 
-        const hasModelsToDownload = modelsReadyToDownload.length > 0;
+            const hasModelsToDownload = modelsReadyToDownload.length > 0;
 
-        if (this.downloadAllButton) {
-            this.downloadAllButton.disabled = !hasModelsToDownload;
-            if (hasModelsToDownload) {
-                this.downloadAllButton.style.backgroundColor = COLORS.PRIMARY_GREEN;
-                this.downloadAllButton.style.cursor = 'pointer';
-                this.downloadAllButton.style.opacity = '1';
-            } else {
-                this.downloadAllButton.style.backgroundColor = COLORS.DARK_GRAY;
-                this.downloadAllButton.style.cursor = 'not-allowed';
-                this.downloadAllButton.style.opacity = '0.5';
+            if (this.downloadAllButton) {
+                this.downloadAllButton.disabled = !hasModelsToDownload;
+                if (hasModelsToDownload) {
+                    this.downloadAllButton.style.backgroundColor = COLORS.PRIMARY_GREEN;
+                    this.downloadAllButton.style.cursor = 'pointer';
+                    this.downloadAllButton.style.opacity = '1';
+                } else {
+                    this.downloadAllButton.style.backgroundColor = COLORS.DARK_GRAY;
+                    this.downloadAllButton.style.cursor = 'not-allowed';
+                    this.downloadAllButton.style.opacity = '0.5';
+                }
             }
-        }
+        });
     }
 
     showScanProgress() {
-        // Clear existing content
-        this.modelsListElement.innerHTML = '';
+        this.scheduleDomUpdate(() => {
+            this.modelsListElement.innerHTML = '';
 
-        // Create scan progress container
-        const progressContainer = $el("div", {
-            style: {
-                padding: '40px',
-                textAlign: 'center'
-            }
-        }, [
-            $el("div", {
-                textContent: "Scanning workflow...",
+            const progressContainer = $el("div", {
                 style: {
-                    fontSize: '16px',
-                    color: '#ddd',
-                    marginBottom: '20px'
-                }
-            }),
-            $el("div.progress-bar", {
-                style: {
-                    width: '100%',
-                    height: '8px',
-                    backgroundColor: '#333',
-                    borderRadius: '4px',
-                    overflow: 'hidden',
-                    position: 'relative'
+                    padding: '40px',
+                    textAlign: 'center'
                 }
             }, [
-                $el("div.progress-fill", {
+                $el("div", {
+                    textContent: "Scanning workflow...",
                     style: {
-                        width: '0%',
-                        height: '100%',
-                        backgroundColor: '#6c9',
-                        transition: 'width 0.3s ease',
-                        borderRadius: '4px'
+                        fontSize: '16px',
+                        color: '#ddd',
+                        marginBottom: '20px'
+                    }
+                }),
+                $el("div.progress-bar", {
+                    style: {
+                        width: '100%',
+                        height: '8px',
+                        backgroundColor: '#333',
+                        borderRadius: '4px',
+                        overflow: 'hidden',
+                        position: 'relative'
+                    }
+                }, [
+                    $el("div.progress-fill", {
+                        style: {
+                            width: '0%',
+                            height: '100%',
+                            backgroundColor: '#6c9',
+                            transition: 'width 0.3s ease',
+                            borderRadius: '4px'
+                        }
+                    })
+                ]),
+                $el("div", {
+                    textContent: "Scanning workflow nodes...",
+                    style: {
+                        fontSize: '13px',
+                        color: '#999',
+                        marginTop: '12px'
                     }
                 })
-            ]),
-            $el("div", {
-                textContent: "Scanning workflow nodes...",
-                style: {
-                    fontSize: '13px',
-                    color: '#999',
-                    marginTop: '12px'
-                }
-            })
-        ]);
+            ]);
 
-        this._scanProgressContainer = progressContainer;
-        this._scanProgressFill = progressContainer.querySelector('.progress-fill');
-        this._scanProgressMessage = progressContainer.children[2];
+            this._scanProgressContainer = progressContainer;
+            this._scanProgressFill = progressContainer.querySelector('.progress-fill');
+            this._scanProgressMessage = progressContainer.children[2];
 
-        this.modelsListElement.appendChild(progressContainer);
+            this.modelsListElement.appendChild(progressContainer);
+        });
     }
 
     updateScanProgress(progress) {
-        if (this._scanProgressFill) {
-            this._scanProgressFill.style.width = `${progress.progress}%`;
-        }
-        if (this._scanProgressMessage) {
-            this._scanProgressMessage.textContent = progress.message || 'Scanning...';
-        }
+        this.scheduleDomUpdate(() => {
+            if (this._scanProgressFill) {
+                this._scanProgressFill.style.width = `${progress.progress}%`;
+            }
+            if (this._scanProgressMessage) {
+                this._scanProgressMessage.textContent = progress.message || 'Scanning...';
+            }
+        });
     }
 
     displayModels() {
-        this.modelsListElement.innerHTML = '';
+        this.scheduleDomUpdate(() => {
+            this.modelsListElement.innerHTML = '';
 
-        const hasAnyModels = this.missingModels.length > 0 ||
-                            this.notFoundModels.length > 0 ||
-                            this.correctedModels.length > 0;
+            const hasAnyModels = this.missingModels.length > 0 ||
+                                this.notFoundModels.length > 0 ||
+                                this.correctedModels.length > 0;
 
-        if (!hasAnyModels) {
-            this.modelsListElement.appendChild(
-                $el("div", {
-                    textContent: "No missing models found",
-                    style: {
-                        textAlign: 'center',
-                        color: '#666',
-                        padding: '40px',
-                        fontSize: '14px',
-                        lineHeight: '1.5'
-                    }
-                })
-            );
-            this.updateDownloadAllButtonState();
-            return;
-        }
+            if (!hasAnyModels) {
+                this.modelsListElement.appendChild(
+                    $el("div", {
+                        textContent: "No missing models found",
+                        style: {
+                            textAlign: 'center',
+                            color: '#666',
+                            padding: '40px',
+                            fontSize: '14px',
+                            lineHeight: '1.5'
+                        }
+                    })
+                );
+                this.updateDownloadAllButtonState();
+                return;
+            }
 
-        // Display corrected models first if any
-        if (this.correctedModels.length > 0) {
-            this.modelsListElement.appendChild(this.createCorrectedModelsSection());
-        }
-
-        // Display missing models with URLs (ready to download)
-        if (this.missingModels.length > 0) {
             if (this.correctedModels.length > 0) {
-                this.modelsListElement.appendChild($el("div", {
-                    style: { height: '1px', backgroundColor: '#444', margin: '20px 0' }
-                }));
+                this.modelsListElement.appendChild(this.createCorrectedModelsSection());
             }
 
-            this.modelsListElement.appendChild($el("h3", {
-                textContent: "Missing Models - Ready to Download",
-                style: {
-                    color: '#fff',
-                    fontSize: '16px',
-                    fontWeight: '600',
-                    marginBottom: '12px',
-                    marginTop: '0'
+            if (this.missingModels.length > 0) {
+                if (this.correctedModels.length > 0) {
+                    this.modelsListElement.appendChild($el("div", {
+                        style: { height: '1px', backgroundColor: '#444', margin: '20px 0' }
+                    }));
                 }
-            }));
 
-            this.missingModels.forEach((model, index) => {
-                const modelCard = this.createModelCard(model, index);
-                this.modelsListElement.appendChild(modelCard);
-            });
-        }
-
-        // Display models that couldn't be found
-        if (this.notFoundModels.length > 0) {
-            if (this.correctedModels.length > 0 || this.missingModels.length > 0) {
-                this.modelsListElement.appendChild($el("div", {
-                    style: { height: '1px', backgroundColor: '#444', margin: '20px 0' }
+                this.modelsListElement.appendChild($el("h3", {
+                    textContent: "Missing Models - Ready to Download",
+                    style: {
+                        color: '#fff',
+                        fontSize: '16px',
+                        fontWeight: '600',
+                        marginBottom: '12px',
+                        marginTop: '0'
+                    }
                 }));
+
+                this.missingModels.forEach((model, index) => {
+                    const modelCard = this.createModelCard(model, index);
+                    this.modelsListElement.appendChild(modelCard);
+                });
             }
 
-            this.modelsListElement.appendChild($el("h3", {
-                textContent: "Models Not Found",
-                style: {
-                    color: '#f66',
-                    fontSize: '16px',
-                    fontWeight: '600',
-                    marginBottom: '12px',
-                    marginTop: '0'
+            if (this.notFoundModels.length > 0) {
+                if (this.correctedModels.length > 0 || this.missingModels.length > 0) {
+                    this.modelsListElement.appendChild($el("div", {
+                        style: { height: '1px', backgroundColor: '#444', margin: '20px 0' }
+                    }));
                 }
-            }));
 
-            this.notFoundModels.forEach((model) => {
-                const modelCard = this.createNotFoundModelCard(model);
-                this.modelsListElement.appendChild(modelCard);
-            });
-        }
+                this.modelsListElement.appendChild($el("h3", {
+                    textContent: "Models Not Found",
+                    style: {
+                        color: '#f66',
+                        fontSize: '16px',
+                        fontWeight: '600',
+                        marginBottom: '12px',
+                        marginTop: '0'
+                    }
+                }));
 
-        // Update Download All button state after displaying models
-        this.updateDownloadAllButtonState();
+                this.notFoundModels.forEach((model) => {
+                    const modelCard = this.createNotFoundModelCard(model);
+                    this.modelsListElement.appendChild(modelCard);
+                });
+            }
+
+            this.updateDownloadAllButtonState();
+        });
     }
+
 
     createNotFoundModelCard(model) {
         const infoItems = [
@@ -1278,7 +992,6 @@ class MissingModelsDialog extends ComfyDialog {
 
     async pollProgress(model) {
         const pollKey = model.expected_filename || model.name;
-        const progressFill = model._progressBar.querySelector('.progress-fill');
 
         pollEndpoint(
             `/download-missing/status/${encodeURIComponent(pollKey)}`,
@@ -1286,73 +999,82 @@ class MissingModelsDialog extends ComfyDialog {
                 if (data.status === 'success' && data.progress) {
                     const progress = data.progress;
 
-                    // Skip DOM updates if user is actively scrolling to prevent position jumps
-                    if (this.isUserScrolling) {
+                    if (this.uiFrozen) {
+                        this.pendingProgressUpdates.set(model.name, { model, progress });
                         return;
                     }
 
-                    // Update progress bar
-                    if (progressFill) {
-                        progressFill.style.width = `${progress.progress}%`;
-                    }
-
-                    // Update status text
-                    if (progress.status === 'downloading') {
-                        const downloadedMB = (progress.downloaded / (1024 * 1024)).toFixed(2);
-                        const totalMB = (progress.total / (1024 * 1024)).toFixed(2);
-                        model._statusText.textContent = `Downloading: ${downloadedMB} MB / ${totalMB} MB (${progress.progress}%)`;
-                        model._statusText.style.color = COLORS.PROGRESS_GREEN;
-                        // Add pulsing animation
-                        if (progressFill) {
-                            progressFill.classList.add('progress-downloading');
-                        }
-                    } else if (progress.status === 'completed') {
-                        this.downloadingModels.delete(model.name);
-
-                        // Remove pulsing animation
-                        if (progressFill) {
-                            progressFill.classList.remove('progress-downloading');
-                        }
-
-                        model._statusText.textContent = 'Download completed!';
-                        model._statusText.style.color = COLORS.PROGRESS_GREEN;
-                        model._downloadButton.textContent = "Completed";
-                        model._downloadButton.style.backgroundColor = COLORS.PRIMARY_GREEN;
-                        model._card.style.opacity = '0.7';
-
-                        // Update Download All button state
-                        this.updateDownloadAllButtonState();
-                    } else if (progress.status === 'error') {
-                        this.downloadingModels.delete(model.name);
-
-                        model._statusText.textContent = `Error: ${progress.error || 'Unknown error'}`;
-                        model._statusText.style.color = COLORS.ERROR_RED;
-                        model._downloadButton.textContent = "Failed";
-                        model._downloadButton.disabled = true;
-
-                        // Update Download All button state
-                        this.updateDownloadAllButtonState();
-                    } else if (progress.status === 'cancelled') {
-                        this.downloadingModels.delete(model.name);
-
-                        model._statusText.textContent = 'Download cancelled';
-                        model._statusText.style.color = COLORS.WARNING_ORANGE;
-                        model._downloadButton.textContent = "Download";
-                        model._downloadButton.disabled = false;
-
-                        // Update Download All button state
-                        this.updateDownloadAllButtonState();
-                    }
+                    this.pendingProgressUpdates.delete(model.name);
+                    this.applyProgressUpdate(model, progress);
                 }
             },
             (data) => {
-                // Stop polling when download reaches terminal state
                 return data.status === 'success' && data.progress &&
                        ['completed', 'error', 'cancelled'].includes(data.progress.status);
             },
-            500, // Poll every 500ms
+            500,
             (error) => console.error("[Missing Models] Poll error:", error)
         );
+    }
+
+    applyProgressUpdate(model, progress) {
+        this.scheduleDomUpdate(() => {
+            const progressFill = model._progressBar?.querySelector('.progress-fill');
+
+            if (progressFill) {
+                progressFill.style.width = `${progress.progress}%`;
+            }
+
+            if (progress.status === 'downloading') {
+                const downloadedMB = (progress.downloaded / (1024 * 1024)).toFixed(2);
+                const totalMB = (progress.total / (1024 * 1024)).toFixed(2);
+                model._statusText.textContent = `Downloading: ${downloadedMB} MB / ${totalMB} MB (${progress.progress}%)`;
+                model._statusText.style.color = COLORS.PROGRESS_GREEN;
+                if (progressFill) {
+                    progressFill.classList.add('progress-downloading');
+                }
+            } else if (progress.status === 'completed') {
+                this.downloadingModels.delete(model.name);
+                if (progressFill) {
+                    progressFill.classList.remove('progress-downloading');
+                }
+                model._statusText.textContent = 'Download completed!';
+                model._statusText.style.color = COLORS.PROGRESS_GREEN;
+                model._downloadButton.textContent = "Completed";
+                model._downloadButton.style.backgroundColor = COLORS.PRIMARY_GREEN;
+                model._card.style.opacity = '0.7';
+                this.updateDownloadAllButtonState();
+            } else if (progress.status === 'error') {
+                this.downloadingModels.delete(model.name);
+                model._statusText.textContent = `Error: ${progress.error || 'Unknown error'}`;
+                model._statusText.style.color = COLORS.ERROR_RED;
+                model._downloadButton.textContent = "Failed";
+                model._downloadButton.disabled = true;
+                if (progressFill) {
+                    progressFill.classList.remove('progress-downloading');
+                }
+                this.updateDownloadAllButtonState();
+            } else if (progress.status === 'cancelled') {
+                this.downloadingModels.delete(model.name);
+                model._statusText.textContent = 'Download cancelled';
+                model._statusText.style.color = COLORS.WARNING_ORANGE;
+                model._downloadButton.textContent = "Download";
+                model._downloadButton.disabled = false;
+                if (progressFill) {
+                    progressFill.classList.remove('progress-downloading');
+                }
+                this.updateDownloadAllButtonState();
+            }
+        });
+    }
+
+    flushPendingProgressUpdates() {
+        if (this.pendingProgressUpdates.size === 0) {
+            return;
+        }
+        const pending = Array.from(this.pendingProgressUpdates.values());
+        this.pendingProgressUpdates.clear();
+        pending.forEach(({ model, progress }) => this.applyProgressUpdate(model, progress));
     }
 
     async downloadAllModels() {
@@ -1382,15 +1104,17 @@ class MissingModelsDialog extends ComfyDialog {
     }
 
     updateStatus(message, type = STATUS_TYPES.INFO) {
-        this.statusElement.innerHTML = '';
-        this.statusElement.appendChild(
-            $el("span", {
-                textContent: message,
-                style: {
-                    color: STATUS_COLORS[type] || COLORS.LIGHT_GRAY
-                }
-            })
-        );
+        this.scheduleDomUpdate(() => {
+            this.statusElement.innerHTML = '';
+            this.statusElement.appendChild(
+                $el("span", {
+                    textContent: message,
+                    style: {
+                        color: STATUS_COLORS[type] || COLORS.LIGHT_GRAY
+                    }
+                })
+            );
+        });
     }
 
     async show() {
@@ -1399,6 +1123,10 @@ class MissingModelsDialog extends ComfyDialog {
         this.notFoundModels = [];
         this.correctedModels = [];
         this.downloadingModels.clear();
+        this.pendingProgressUpdates.clear();
+        this.domUpdateQueue = [];
+        this.uiFrozen = false;
+        this.isMouseDown = false;
         this.modelsListElement.innerHTML = '';
         this.updateStatus("Initializing...", STATUS_TYPES.INFO);
 
@@ -1422,30 +1150,9 @@ class MissingModelsDialog extends ComfyDialog {
             this.element.style.display = "none";
         }, 300);
 
-        // Clean up all event listeners
-        if (this.modelsListElement) {
-            if (this.scrollEventHandler) {
-                this.modelsListElement.removeEventListener('scroll', this.scrollEventHandler);
-            }
-            if (this.mouseDownHandler) {
-                this.modelsListElement.removeEventListener('mousedown', this.mouseDownHandler);
-            }
-            if (this.wheelHandler) {
-                this.modelsListElement.removeEventListener('wheel', this.wheelHandler);
-            }
-            if (this.keyDownHandler) {
-                this.modelsListElement.removeEventListener('keydown', this.keyDownHandler);
-            }
-        }
-
-        // Clear scroll timeout
-        if (this.scrollTimeout) {
-            clearTimeout(this.scrollTimeout);
-            this.scrollTimeout = null;
-        }
-
-        // Reset scroll flag
-        this.isUserScrolling = false;
+        this.uiFrozen = false;
+        this.pendingProgressUpdates.clear();
+        this.domUpdateQueue = [];
 
         // Stop all downloads
         this.downloadingModels.forEach(modelName => {
