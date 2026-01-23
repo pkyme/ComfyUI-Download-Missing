@@ -41,6 +41,18 @@ class WorkflowScanner:
         self.session = session
         self.scan_progress = scan_progress
 
+    def _collect_all_nodes(self, workflow: dict) -> List[dict]:
+        """Collect nodes from workflow and all subgraphs."""
+        nodes = list(workflow.get("nodes", []))
+
+        definitions = workflow.get("definitions", {})
+        subgraphs = definitions.get("subgraphs", [])
+        for subgraph in subgraphs:
+            subgraph_nodes = subgraph.get("nodes", [])
+            nodes.extend(subgraph_nodes)
+
+        return nodes
+
     async def find_missing_models(self, workflow: dict) -> ScanResult:
         """Scan workflow and find missing models, auto-correcting when possible."""
         scan_id = self.CURRENT_SCAN_ID
@@ -54,7 +66,7 @@ class WorkflowScanner:
         missing_models: List[MissingModel] = []
         missing_no_url: List[MissingModel] = []
         corrected_models: List[Correction] = []
-        nodes = workflow.get("nodes", [])
+        nodes = self._collect_all_nodes(workflow)
         total_nodes = len(nodes)
 
         for node_idx, node in enumerate(nodes):
@@ -575,7 +587,7 @@ class WorkflowScanner:
 
     def extract_urls_from_notes(self, workflow: dict) -> List[dict]:
         extracted_urls: List[dict] = []
-        nodes = workflow.get("nodes", [])
+        nodes = self._collect_all_nodes(workflow)
 
         for node in nodes:
             node_type = node.get("type", "")
