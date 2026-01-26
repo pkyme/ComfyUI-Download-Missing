@@ -35,11 +35,20 @@ class WorkflowScanner:
         hf_search: HuggingFaceSearch,
         session: aiohttp.ClientSession,
         scan_progress: Dict[str, ScanStatus],
+        hf_token: Optional[str] = None,
     ):
         self.folder_registry = folder_registry
         self.hf_search = hf_search
         self.session = session
         self.scan_progress = scan_progress
+        self.hf_token = hf_token
+
+    def _get_hf_headers(self, url: str) -> Dict[str, str]:
+        """Build headers for HuggingFace requests."""
+        headers: Dict[str, str] = {}
+        if self.hf_token and "huggingface.co" in url:
+            headers["Authorization"] = f"Bearer {self.hf_token}"
+        return headers
 
     def _collect_all_nodes(self, workflow: dict) -> List[dict]:
         """Collect nodes from workflow and all subgraphs."""
@@ -328,8 +337,12 @@ class WorkflowScanner:
     async def validate_url(self, url: str) -> bool:
         """Validate a URL by sending a HEAD request."""
         try:
+            headers = self._get_hf_headers(url)
             async with self.session.head(
-                url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=10)
+                url,
+                allow_redirects=True,
+                timeout=aiohttp.ClientTimeout(total=10),
+                headers=headers,
             ) as response:
                 return response.status < 400
         except Exception as exc:
@@ -517,13 +530,20 @@ class WorkflowScanner:
             name = (model.name or "").replace("\\", "/").lower()
             return name, folder
 
+        def _basename_key(model: MissingModel) -> str:
+            name = (model.name or "").replace("\\", "/")
+            return os.path.basename(name).lower()
+
         seen_missing: Dict[Tuple[str, str], MissingModel] = {}
+        seen_missing_by_basename: Dict[str, MissingModel] = {}
         unique_missing: List[MissingModel] = []
         for model in missing_models:
             key = _missing_key(model)
+            basename = _basename_key(model)
             if key not in seen_missing:
                 model.related_usages = [self._usage_metadata(model)]
                 seen_missing[key] = model
+                seen_missing_by_basename[basename] = model
                 unique_missing.append(model)
             else:
                 seen_missing[key].related_usages.append(self._usage_metadata(model))
@@ -545,7 +565,16 @@ class WorkflowScanner:
         unique_no_url: List[MissingModel] = []
         for model in missing_no_url:
             key = _missing_key(model)
-            if key not in seen_no_url:
+            basename = _basename_key(model)
+            if key in seen_missing:
+                # Exact match (name + folder) already has a URL
+                seen_missing[key].related_usages.append(self._usage_metadata(model))
+            elif basename in seen_missing_by_basename:
+                # Same filename exists with URL (different folder), merge into that
+                seen_missing_by_basename[basename].related_usages.append(
+                    self._usage_metadata(model)
+                )
+            elif key not in seen_no_url:
                 model.related_usages = [self._usage_metadata(model)]
                 seen_no_url[key] = model
                 unique_no_url.append(model)

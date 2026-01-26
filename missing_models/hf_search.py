@@ -26,8 +26,9 @@ class HuggingFaceSearch:
     MIN_FUZZY_SCORE = 0.55
     MAX_FUZZY_RESULTS = 10
 
-    def __init__(self, cache_file: str):
+    def __init__(self, cache_file: str, hf_token: Optional[str] = None):
         self.cache_file = cache_file
+        self.hf_token = hf_token
         self.cache_data: Dict[str, Dict] = self._load_cache()
         self.repo_files_cache: Dict[str, List[str]] = {}
 
@@ -45,7 +46,7 @@ class HuggingFaceSearch:
 
             exact_matches: List[dict] = []
             fuzzy_candidates: List[dict] = []
-            api = HfApi()
+            api = HfApi(token=self.hf_token)
 
             for entry in POPULAR_HF_USERS:
                 try:
@@ -134,7 +135,7 @@ class HuggingFaceSearch:
     async def list_user_repos(self, username: str) -> List[Tuple[str, Optional[str]]]:
         """List repos for a HuggingFace user."""
         try:
-            api = HfApi()
+            api = HfApi(token=self.hf_token)
             loop = asyncio.get_event_loop()
             models = await loop.run_in_executor(
                 None,

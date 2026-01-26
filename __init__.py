@@ -65,16 +65,23 @@ class MissingModelsExtension:
         self.extension_dir = os.path.dirname(os.path.realpath(__file__))
         cache_file = os.path.join(self.extension_dir, "repo_cache.json")
 
+        self.hf_token = os.environ.get("HF_TOKEN")
+        if self.hf_token:
+            logging.info("[Download Missing Models] HuggingFace token detected")
+
         self.scan_progress: Dict[str, ScanStatus] = {}
         self.folder_registry = FolderRegistry(self.extension_dir)
-        self.hf_search = HuggingFaceSearch(cache_file)
+        self.hf_search = HuggingFaceSearch(cache_file, hf_token=self.hf_token)
         self.scanner = WorkflowScanner(
             folder_registry=self.folder_registry,
             hf_search=self.hf_search,
             session=self.session,
             scan_progress=self.scan_progress,
+            hf_token=self.hf_token,
         )
-        self.download_manager = DownloadManager(self.session, self.folder_registry)
+        self.download_manager = DownloadManager(
+            self.session, self.folder_registry, hf_token=self.hf_token
+        )
 
         self.setup_routes()
         logging.info(

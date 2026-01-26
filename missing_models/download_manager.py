@@ -20,11 +20,24 @@ class DownloadManager:
     DOWNLOAD_CHUNK_SIZE = 4 * 1024 * 1024  # 4MB
     DOWNLOAD_PROGRESS_UPDATE_INTERVAL = 20 * 1024 * 1024  # 20MB
 
-    def __init__(self, session: aiohttp.ClientSession, folder_registry: FolderRegistry):
+    def __init__(
+        self,
+        session: aiohttp.ClientSession,
+        folder_registry: FolderRegistry,
+        hf_token: Optional[str] = None,
+    ):
         self.session = session
         self.folder_registry = folder_registry
+        self.hf_token = hf_token
         self._tasks: Dict[str, asyncio.Task] = {}
         self._progress: Dict[str, DownloadStatus] = {}
+
+    def _get_download_headers(self, url: str) -> Dict[str, str]:
+        """Build headers for download requests, adding auth for HuggingFace URLs."""
+        headers: Dict[str, str] = {}
+        if self.hf_token and "huggingface.co" in url:
+            headers["Authorization"] = f"Bearer {self.hf_token}"
+        return headers
 
     def get_all_progress(self) -> Dict[str, Dict]:
         return {name: status.to_payload() for name, status in self._progress.items()}
@@ -75,7 +88,8 @@ class DownloadManager:
         temp_path = dest_path + ".tmp"
 
         try:
-            async with self.session.get(job.download_url) as response:
+            headers = self._get_download_headers(job.download_url)
+            async with self.session.get(job.download_url, headers=headers) as response:
                 if response.status != 200:
                     raise Exception(f"HTTP {response.status}: {response.reason}")
 
