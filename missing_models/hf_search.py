@@ -17,6 +17,7 @@ POPULAR_HF_USERS = [
     "Comfy-Org",
     "comfyanonymous",
     "lightx2v",
+    "QuantStack"
 ]
 
 
