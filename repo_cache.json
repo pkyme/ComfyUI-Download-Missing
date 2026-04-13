@@ -6011,5 +6011,43 @@
       "vae/config.json",
       "vae/diffusion_pytorch_model.safetensors"
     ]
+  },
+  "unsloth/gemma-3-12b-it-qat-GGUF": {
+    "last_modified": "2025-05-12T03:54:19+00:00",
+    "files": [
+      ".gitattributes",
+      "README.md",
+      "config.json",
+      "gemma-3-12b-it-qat-BF16.gguf",
+      "gemma-3-12b-it-qat-IQ4_NL.gguf",
+      "gemma-3-12b-it-qat-IQ4_XS.gguf",
+      "gemma-3-12b-it-qat-Q2_K.gguf",
+      "gemma-3-12b-it-qat-Q2_K_L.gguf",
+      "gemma-3-12b-it-qat-Q3_K_M.gguf",
+      "gemma-3-12b-it-qat-Q3_K_S.gguf",
+      "gemma-3-12b-it-qat-Q4_0.gguf",
+      "gemma-3-12b-it-qat-Q4_1.gguf",
+      "gemma-3-12b-it-qat-Q4_K_M.gguf",
+      "gemma-3-12b-it-qat-Q4_K_S.gguf",
+      "gemma-3-12b-it-qat-Q5_K_M.gguf",
+      "gemma-3-12b-it-qat-Q5_K_S.gguf",
+      "gemma-3-12b-it-qat-Q6_K.gguf",
+      "gemma-3-12b-it-qat-Q8_0.gguf",
+      "gemma-3-12b-it-qat-UD-IQ1_M.gguf",
+      "gemma-3-12b-it-qat-UD-IQ1_S.gguf",
+      "gemma-3-12b-it-qat-UD-IQ2_M.gguf",
+      "gemma-3-12b-it-qat-UD-IQ2_XXS.gguf",
+      "gemma-3-12b-it-qat-UD-IQ3_XXS.gguf",
+      "gemma-3-12b-it-qat-UD-Q2_K_XL.gguf",
+      "gemma-3-12b-it-qat-UD-Q3_K_XL.gguf",
+      "gemma-3-12b-it-qat-UD-Q4_K_XL.gguf",
+      "gemma-3-12b-it-qat-UD-Q5_K_XL.gguf",
+      "gemma-3-12b-it-qat-UD-Q6_K_XL.gguf",
+      "gemma-3-12b-it-qat-UD-Q8_K_XL.gguf",
+      "imatrix_unsloth.dat",
+      "mmproj-BF16.gguf",
+      "mmproj-F16.gguf",
+      "mmproj-F32.gguf"
+    ]
   }
 }

@@ -18,7 +18,8 @@ POPULAR_HF_USERS = [
     "comfyanonymous",
     "lightx2v",
     "QuantStack",
-    "collection:unsloth/unsloth-diffusion-ggufs"
+    "collection:unsloth/unsloth-diffusion-ggufs",
+    "unsloth/gemma-3-12b-it-qat-GGUF"
 ]
 
 
