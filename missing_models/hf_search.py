@@ -34,6 +34,8 @@ class HuggingFaceSearch:
         self.hf_token = hf_token
         self.cache_data: Dict[str, Dict] = self._load_cache()
         self.repo_files_cache: Dict[str, List[str]] = {}
+        self._user_repos_cache: Dict[str, List[Tuple[str, Optional[str]]]] = {}
+        self._resolved_collection_slugs: Dict[str, Optional[str]] = {}
 
     async def search_popular_repos(self, filename: str) -> Dict[str, List[dict]]:
         """Search through popular repos for a filename.
@@ -139,6 +141,9 @@ class HuggingFaceSearch:
 
     async def list_user_repos(self, username: str) -> List[Tuple[str, Optional[str]]]:
         """List repos for a HuggingFace user."""
+        if username in self._user_repos_cache:
+            return self._user_repos_cache[username]
+
         try:
             api = HfApi(token=self.hf_token)
             loop = asyncio.get_event_loop()
@@ -157,6 +162,7 @@ class HuggingFaceSearch:
                 )
                 repo_data.append((repo_id, last_modified))
 
+            self._user_repos_cache[username] = repo_data
             return repo_data
         except Exception as exc:
             logging.warning(
@@ -207,33 +213,43 @@ class HuggingFaceSearch:
         self, api: HfApi, loop, collection_slug: str
     ) -> Optional[str]:
         """Return the full collection slug, resolving partial slugs by owner lookup."""
+        if collection_slug in self._resolved_collection_slugs:
+            return self._resolved_collection_slugs[collection_slug]
+
+        resolved: Optional[str] = None
         try:
             await loop.run_in_executor(None, lambda: api.get_collection(collection_slug))
-            return collection_slug
+            resolved = collection_slug
         except Exception:
             pass
 
-        owner = collection_slug.split("/")[0]
-        try:
-            collections = await loop.run_in_executor(
-                None, lambda: list(api.list_collections(owner=owner))
-            )
-            for col in collections:
-                if col.slug.startswith(collection_slug):
-                    return col.slug
-        except Exception as exc:
-            logging.warning(
-                "[Download Missing Models] Error resolving collection slug for %s: %s",
-                owner,
-                exc,
-            )
+        if resolved is None:
+            owner = collection_slug.split("/")[0]
+            try:
+                collections = await loop.run_in_executor(
+                    None, lambda: list(api.list_collections(owner=owner))
+                )
+                for col in collections:
+                    if col.slug.startswith(collection_slug):
+                        resolved = col.slug
+                        break
+            except Exception as exc:
+                logging.warning(
+                    "[Download Missing Models] Error resolving collection slug for %s: %s",
+                    owner,
+                    exc,
+                )
 
-        return None
+        self._resolved_collection_slugs[collection_slug] = resolved
+        return resolved
 
     async def _fetch_repo_files_with_cache(
         self, api: HfApi, repo_id: str, repo_last_modified: Optional[str]
     ) -> List[str]:
         """Fetch repository file list with cache support."""
+        if repo_id in self.repo_files_cache:
+            return self.repo_files_cache[repo_id]
+
         if repo_last_modified is None:
             try:
                 loop = asyncio.get_event_loop()
