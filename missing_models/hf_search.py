@@ -18,6 +18,7 @@ POPULAR_HF_USERS = [
     "comfyanonymous",
     "lightx2v",
     "QuantStack"
+    "unsloth"
 ]
 
 
