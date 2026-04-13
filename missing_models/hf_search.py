@@ -18,7 +18,7 @@ POPULAR_HF_USERS = [
     "comfyanonymous",
     "lightx2v",
     "QuantStack",
-    "unsloth"
+    "collection:unsloth/unsloth-diffusion-ggufs"
 ]
 
 
@@ -52,7 +52,9 @@ class HuggingFaceSearch:
 
             for entry in POPULAR_HF_USERS:
                 try:
-                    if "/" in entry:
+                    if entry.startswith("collection:"):
+                        repo_data = await self.list_collection_repos(entry[len("collection:"):])
+                    elif "/" in entry:
                         repo_data = [(entry, None)]
                     else:
                         repo_data = await self.list_user_repos(entry)
@@ -163,6 +165,70 @@ class HuggingFaceSearch:
             )
             return []
 
+    async def list_collection_repos(self, collection_slug: str) -> List[Tuple[str, Optional[str]]]:
+        """List model repos belonging to a HuggingFace collection.
+
+        collection_slug should be in the form ``owner/collection-name`` as it
+        appears after ``/collections/`` in the HuggingFace URL. The trailing
+        hash ID is resolved automatically if omitted.
+        """
+        try:
+            api = HfApi(token=self.hf_token)
+            loop = asyncio.get_event_loop()
+
+            resolved_slug = await self._resolve_collection_slug(api, loop, collection_slug)
+            if resolved_slug is None:
+                logging.warning(
+                    "[Download Missing Models] Could not resolve collection: %s",
+                    collection_slug,
+                )
+                return []
+
+            collection = await loop.run_in_executor(
+                None, lambda: api.get_collection(resolved_slug)
+            )
+
+            repo_data: List[Tuple[str, Optional[str]]] = []
+            for item in collection.items:
+                if item.item_type == "model":
+                    repo_data.append((item.item_id, None))
+
+            return repo_data
+        except Exception as exc:
+            logging.warning(
+                "[Download Missing Models] Error listing collection %s: %s",
+                collection_slug,
+                exc,
+            )
+            return []
+
+    async def _resolve_collection_slug(
+        self, api: HfApi, loop, collection_slug: str
+    ) -> Optional[str]:
+        """Return the full collection slug, resolving partial slugs by owner lookup."""
+        try:
+            await loop.run_in_executor(None, lambda: api.get_collection(collection_slug))
+            return collection_slug
+        except Exception:
+            pass
+
+        owner = collection_slug.split("/")[0]
+        try:
+            collections = await loop.run_in_executor(
+                None, lambda: list(api.list_collections(owner=owner))
+            )
+            for col in collections:
+                if col.slug.startswith(collection_slug):
+                    return col.slug
+        except Exception as exc:
+            logging.warning(
+                "[Download Missing Models] Error resolving collection slug for %s: %s",
+                owner,
+                exc,
+            )
+
+        return None
+
     async def _fetch_repo_files_with_cache(
         self, api: HfApi, repo_id: str, repo_last_modified: Optional[str]
     ) -> List[str]:
@@ -171,7 +237,7 @@ class HuggingFaceSearch:
             try:
                 loop = asyncio.get_event_loop()
                 repo_info = await loop.run_in_executor(
-                    None, api.repo_info, repo_id, "model"
+                    None, lambda: api.repo_info(repo_id, repo_type="model")
                 )
                 if hasattr(repo_info, "lastModified") and repo_info.lastModified:
                     repo_last_modified = repo_info.lastModified.isoformat()
@@ -280,6 +346,45 @@ class HuggingFaceSearch:
         prefix_bonus = 0.05 if normalized1.startswith(normalized2) or normalized2.startswith(normalized1) else 0
         combined = max(base_ratio, simple_ratio) + prefix_bonus
         return min(1.0, combined)
+
+    async def refresh_cache(self) -> dict:
+        """Update the repo file cache for all popular HF users, skipping unchanged repos."""
+        api = HfApi(token=self.hf_token)
+        total_repos = 0
+
+        for entry in POPULAR_HF_USERS:
+            try:
+                if entry.startswith("collection:"):
+                    repo_data = await self.list_collection_repos(entry[len("collection:"):])
+                elif "/" in entry:
+                    repo_data = [(entry, None)]
+                else:
+                    repo_data = await self.list_user_repos(entry)
+
+                for repo_id, repo_last_modified in repo_data:
+                    try:
+                        await self._fetch_repo_files_with_cache(
+                            api, repo_id, repo_last_modified
+                        )
+                        total_repos += 1
+                    except Exception as exc:
+                        logging.warning(
+                            "[Download Missing Models] Error refreshing repo %s: %s",
+                            repo_id,
+                            exc,
+                        )
+            except Exception as exc:
+                logging.warning(
+                    "[Download Missing Models] Error refreshing user %s: %s",
+                    entry,
+                    exc,
+                )
+
+        logging.info(
+            "[Download Missing Models] Cache update complete: %d repos processed",
+            total_repos,
+        )
+        return {"repos_refreshed": total_repos}
 
     def _load_cache(self) -> Dict[str, Dict]:
         try:
