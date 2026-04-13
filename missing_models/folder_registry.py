@@ -12,6 +12,7 @@ import folder_paths
 NODE_TYPE_TO_FOLDER = {
     "WanVideoModelLoader": "diffusion_models",
     "LoadWanVideoT5TextEncoder": "text_encoders",
+    "LatentUpscaleModelLoader": "latent_upscale_models",
 }
 
 NODE_TYPE_KEYWORDS = [
@@ -49,6 +50,7 @@ class FolderRegistry:
             "embeddings": ["embeddings"],
             "hypernetworks": ["hypernetworks"],
             "upscale_models": ["upscale_models"],
+            "latent_upscale_models": ["latent_upscale_models"],
         }
 
         potential_keys = folder_map.get(folder_type.lower(), [folder_type])
